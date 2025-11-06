@@ -1,1 +1,2 @@
-ib_async==0.9.86
+ib_async==2.0.1
+pyyaml==6.0.3
