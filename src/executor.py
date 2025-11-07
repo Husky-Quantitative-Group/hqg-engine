@@ -12,11 +12,23 @@ class Executor:
     def get_order_history(self): # placeholder for order history
         return self.order_history 
 
-       
+
+    async def get_account_value(self):
+        """
+        Get current account value
+        """
+        account_values = self.ib.accountValues()
+        for value in account_values:
+            if value.tag == 'NetLiquidation' and value.currency == 'USD':
+                return float(value.value)
+
+        raise ValueError("Could not retrieve account value")
+
+ 
     async def place_order(self, symbol, quantity, side):
-    """
-    Place an order from a given symbol, quantity, and side
-    """
+        """
+        Place an order from a given symbol, quantity, and side
+        """
 
         contract = Stock(symbol, "SMART", "USD")
         contract = await self.ib.qualifyContractsAsync(contract)

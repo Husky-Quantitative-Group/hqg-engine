@@ -1,0 +1,10 @@
+strategies:
+  - id: "sma_aapl"
+    class_name: "SMAStrategy"
+    tickers: ["AAPL"]
+    portfolio_weight: 0.5
+  
+  - id: "buy_hold"
+    class_name: "BuyHoldStrategy"
+    tickers: ["MSFT", "GOOGL"]
+    portfolio_weight: 0.5

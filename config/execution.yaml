@@ -1,0 +1,8 @@
+ibkr:
+  host: "127.0.0.1"
+  port: 4002
+  client_id: 1
+  market_data_type: 1
+
+portfolio:
+  initial_capital: 100000
