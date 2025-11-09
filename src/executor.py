@@ -65,13 +65,18 @@ class Executor:
     async def rebalance(self, target_weights, portfolio_value):
         """
         Rebalance the portfolio to the target weights
-            target_weights is a dict of {symbol: weight}
+            target_weights is a dict of {symbol: weight} or None
             portfolio_value is the current value of the portfolio
         """
 
-        total_weight = sum(target_weights.values()) # validate (again) that weights sum to 1
-        if not (0.99 <= total_weight <= 1.01): # for rounding errors
-            raise ValueError(f"Target weights sum to {total_weight}")
+        if target_weights is None:
+            print("No signal update this bar")
+            return
+        
+        portfolio_value = portfolio_value * 0.95 # to maintain cash buffer
+        total_weight = sum(target_weights.values())
+        if total_weight > 1.01:  # allow for rounding errors
+            raise ValueError(f"Target weights sum to {total_weight} (exceeds 1.0)")
         
         current_positions = await self.get_positions()
         all_symbols = set(target_weights.keys()) | set(current_positions.keys())
@@ -79,23 +84,27 @@ class Executor:
         
         for symbol in all_symbols:
             contract = Stock(symbol, "SMART", "USD")
-            contract = await self.ib.qualifyContractsAsync(contract)
+            qualified = await self.ib.qualifyContractsAsync(contract)
             
-            if contract:
-                contract = contract[0]
-                ticker = self.ib.reqMktData(contract, "", snapshot=True, regulatorySnapshot=False)
-                await asyncio.sleep(0.2)
+            if qualified:
+                contract = qualified[0]
+                ticker = self.ib.reqMktData(contract, '', False, False)
+                await asyncio.sleep(0.5)
                 
                 price = ticker.last if ticker.last else ticker.close
+                if price is None or price == 0:
+                    print(f"Warning: No valid price data for {symbol}")
+                    continue
+                    
                 prices[symbol] = price
-                
                 self.ib.cancelMktData(contract)
         
         # calculate, for each symbol, the target quantities and amount
         orders_to_place = []
+        drawdown_safety = 0.99 #temporary
         
         for symbol, target_weight in target_weights.items():
-            target_value = portfolio_value * target_weight
+            target_value = portfolio_value * target_weight * drawdown_safety
             
             if symbol not in prices:
                 print(f"Warning: No price data for {symbol}")
@@ -118,11 +127,19 @@ class Executor:
                 quantity = abs(current_positions[symbol])
                 if quantity > 0:
                     orders_to_place.append((symbol, int(quantity), "SELL"))
-        
-        # execute orders
-        for symbol, quantity, side in orders_to_place:
+
+        sell_orders = [(symbol, qty, side) for symbol, qty, side in orders_to_place if side == "SELL"]
+        buy_orders = [(symbol, qty, side) for symbol, qty, side in orders_to_place if side == "BUY"]
+
+        for symbol, quantity, side in sell_orders:
+            if quantity > 0:
+                print(f"Placing order: {side} {quantity} {symbol}")
+                await self.place_order(symbol, quantity, side)
+
+        for symbol, quantity, side in buy_orders:
             if quantity > 0:
                 print(f"Placing order: {side} {quantity} {symbol}")
                 await self.place_order(symbol, quantity, side)
         
-        print(f"Rebalance complete: {len(orders_to_place)} orders were placed")
+        print(f"{len(sell_orders)} sell orders were placed")
+        print(f"{len(buy_orders)} buy orders were placed")
