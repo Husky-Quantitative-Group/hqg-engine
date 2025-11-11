@@ -12,8 +12,8 @@ def aggregate_allocations(allocations: List[Tuple[str, List[Tuple[str, float]], 
     for strategy_id, allocations, aum_weight in allocations:
         total_weight = sum(weight for _, weight in allocations)
         
-        if total_weight > 1.01:  # only validate that weights don't exceed 1.0
-            raise ValueError(f"Strategy {strategy_id} allocations sum to {total_weight} (exceeds 1.0)")
+        if total_weight > 1:  # only validate that weights don't exceed 1.0
+            raise ValueError(f"{strategy_id} allocations sum to {total_weight} (exceeds 1.0)")
         
         for ticker, weight in allocations:
             if ticker in final_weights:

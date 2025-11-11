@@ -75,8 +75,6 @@ class Executor:
         
         portfolio_value = portfolio_value * 0.95 # to maintain cash buffer
         total_weight = sum(target_weights.values())
-        if total_weight > 1.01:  # allow for rounding errors
-            raise ValueError(f"Target weights sum to {total_weight} (exceeds 1.0)")
         
         current_positions = await self.get_positions()
         all_symbols = set(target_weights.keys()) | set(current_positions.keys())
