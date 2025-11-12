@@ -2,10 +2,19 @@ import asyncio
 from datetime import datetime
 from ib_async import IB, Stock
 from .base import MarketDataProvider
+import math
+from enum import Enum
+
+class MarketDataType(Enum):
+    REALTIME = 1
+    FROZEN = 2
+    DELAYED = 3
+    DELAYED_FROZEN = 4
 
 class IBData(MarketDataProvider):
     def __init__(self, connection: IB):
         self.ib = connection
+        self.ib.reqMarketDataType(MarketDataType.DELAYED.value)
         self._tickers = {}
     
     
@@ -15,12 +24,15 @@ class IBData(MarketDataProvider):
         
         if not contract:
             raise ValueError(f"Could not qualify the contract for {symbol}")
-        
         contract = contract[0]
         ticker = self.ib.reqMktData(contract, "", snapshot=True, regulatorySnapshot=False)
         
-        await asyncio.sleep(0.5) # wait for ticker data
-        
+        # wait 3 sec
+        for _ in range(15):
+            await asyncio.sleep(0.2)
+            if (ticker.last and not math.isnan(ticker.last)) or (ticker.close and not math.isnan(ticker.close)):
+                break
+
         return {
             'symbol': symbol,
             'price': ticker.last if ticker.last else ticker.close,
@@ -31,7 +43,7 @@ class IBData(MarketDataProvider):
         }
 
 
-    async def stream_prices(self, symbols: list[str]):
+    async def stream_prices(self, symbols: list[str], interval:float=60.0):
         contracts = [Stock(sym, "SMART", "USD") for sym in symbols]
         qualified = await self.ib.qualifyContractsAsync(*contracts)
         
@@ -44,7 +56,7 @@ class IBData(MarketDataProvider):
             self._tickers[symbol] = ticker
 
         while True:
-            await asyncio.sleep(60)  # wait 1 min per IBKR (to confirm)
+            await asyncio.sleep(interval)
 
             for symbol, ticker in self._tickers.items():
                 price = ticker.last if ticker.last else ticker.close

@@ -13,7 +13,7 @@ class MarketDataProvider(ABC):
         pass
     
     @abstractmethod
-    async def stream_prices(self, symbols: list[str]):
+    async def stream_prices(self, symbols: list[str], interval: float):
         pass
     
     @abstractmethod

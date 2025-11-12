@@ -1,5 +1,7 @@
 from typing import List, Tuple, Dict, Optional
 
+# TODO: isn't the return for a portfolio: dict[str, float]
+
 def aggregate_allocations(allocations: List[Tuple[str, List[Tuple[str, float]], float]]):
     """
     Take in a list of strategy allocations (strategy_id, allocations (list of (ticker, weight) tuples), aum_weight))

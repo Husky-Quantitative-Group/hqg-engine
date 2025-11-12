@@ -81,7 +81,7 @@ class Portfolio:
             aum_weight = strategy['weight']
             
             slice_obj = Slice(data)
-            portfolio_obj = PortfolioView(
+            portfolio_obj = PortfolioView(      # TODO: Brendan - what is this used for??
                 equity=0.0,
                 cash=0.0,
                 positions={},
@@ -93,7 +93,7 @@ class Portfolio:
             if allocations_dict is None:
                 continue
             
-            allocations = list(allocations_dict.items())
+            allocations = list(allocations_dict.items())    # TODO: don't we need key's too?
             strategy_results.append((strategy_id, allocations, aum_weight))
             print(f"Strategy {strategy_id} allocations: {allocations}")
         
@@ -138,7 +138,7 @@ async def run_engine():
         print("Starting trading engine")
         market_data = {}
         ticker_set = set(tickers)
-        async for snapshot in data_provider.stream_prices(tickers):
+        async for snapshot in data_provider.stream_prices(tickers, 60.0):   # always 1-min granularity
             # obtain data for each ticker
             market_data[snapshot['symbol']] = snapshot
             
