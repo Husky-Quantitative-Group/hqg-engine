@@ -65,8 +65,8 @@ async def get_invested_capital():
     """get total invested capital"""
     # TODO: Implement invested capital calculation
     return MetricResponse(
-        value=0.0,
-        unit="USD"
+        value=0.0
+        timeframe=None
     )
 
 
