@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Optional
+from typing import Optional, List, Dict
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -11,170 +11,131 @@ class Timeframe(str, Enum):
     SIX_MONTHS = "6M"
     YEAR_TO_DATE = "YTD"
 
-
 class TradeResponse(BaseModel):
     """Expected data model for trading endpoints"""
     success: bool
     message: str
 
+class EquityResponse(BaseModel):
+    """Expected data model for equity curve endpoint"""
+    # TODO: Define structure for time series data points (to make: database table)
+    # Expected: List of (timestamp, equity_value) pairs or similar
+    data: List[Tuple(str, float)]
 
-class MetricResponse(BaseModel):
-    """Expected data model for PM metrics"""
-    value: float
-    timeframe: Optional[str] = None
+class SnapshotResponse(BaseModel):
+    """Expected data model for portfolio snapshot endpoint"""
+    # TODO: Define structure for main metrics
+    # Expected: equity, capital, net_profit, return_pct
+    equity: float
+    capital: float
+    net_profit: float
+    return_pct: float
+
+class MetricsResponse(BaseModel):
+    """Expected data model for portfolio metrics"""
+    # TODO: Define structure for performance metrics 
+    # Expected: Dict of metric_name -> value (Sharpe, Sortino, CAGR, max_drawdown, alpha, beta, std)
+    metrics: Dict[str, float]
+
+class StrategyAllocationsResponse(BaseModel):
+    """Expected data model for strategy allocations"""
+    # TODO: Define structure for allocations by strategy
+    # Expected: Dict of strategy_id -> allocation mapping
+    allocations: Dict[str, float]
+
+class StockAllocationsResponse(BaseModel):
+    """Expected data model for stock allocations"""
+    # TODO: Define structure for allocations by stock/ticker
+    # Expected: Dict of ticker -> allocation mapping
+    allocations: Dict[str, float]
+
+class EventsResponse(BaseModel):
+    """Expected data model for portfolio events endpoint"""
+    # TODO: Define structure for events list (db table)
+    # what exactly do we want to return? (orders, trades, type, date?)
+    events: List[Tuple(str, str, str, str)]
 
 
-class OrderResponse(BaseModel): # maybe this is not necessary? not too sure
-    """Expected data model for orders endpoint"""
-    count: int
-    timeframe: Optional[str] = None
 
-
-@router.post("/trade/stop", response_model=TradeResponse)
-async def stop_trading():
+@router.post("/portfolio/{id}/stop", response_model=TradeResponse)
+async def stop_trading(id: int):
     """cancel pending orders and prevent new ones"""
     # TODO: Implement stop trading logic
+        # Cancel all pending orders for the portfolio
+        # Set portfolio state to prevent new orders
+        # Return success status
     return TradeResponse(
         success=True,
         message="Trading stopped successfully"
     )
 
-
-@router.post("/trade/resume", response_model=TradeResponse)
-async def resume_trading():
+@router.post("/portfolio/{id}/resume", response_model=TradeResponse)
+async def resume_trading(id: int):
     """allow new orders to be placed"""
     # TODO: Implement resume trading logic
+        # Set portfolio state to allow new orders
+        # Return success status
     return TradeResponse(
         success=True,
         message="Trading resumed successfully"
     )
 
-
-@router.post("/trade/liquidate", response_model=TradeResponse)
-async def liquidate_all():
+@router.post("/portfolio/{id}/liquidate", response_model=TradeResponse)
+async def liquidate_all(id: int):
     """close all open positions"""
     # TODO: Implement liquidation logic
+        # Close all open positions
+        # Return success status
     return TradeResponse(
         success=True,
         message="Liquidation initiated successfully"
     )
 
 
-@router.get("/portfolio/capital", response_model=MetricResponse)
-async def get_invested_capital():
-    """get total invested capital"""
-    # TODO: Implement invested capital calculation
-    return MetricResponse(
-        value=0.0
-        timeframe=None
-    )
 
+@router.get("/portfolio/{id}/equity", response_model=EquityResponse)
+async def get_equity(id: int, timeframe: Optional[Timeframe] = None):
+    """get equity curve time series data"""
+    # TODO: Return equity time series data (back to a given timeframe) (db table to maintain equity value)
+    # Expected response: EquityResponse
+    return EquityResponse(data=[])
 
-@router.get("/portfolio/equity", response_model=MetricResponse)
-async def get_current_equity(timeframe: Optional[Timeframe] = None):
-    """get current equity value"""
-    # TODO: Implement current equity calculation (w/ timeframe)
-    return MetricResponse(
-        value=0.0,
-        timeframe=timeframe.value if timeframe else None
-    )
+@router.get("/portfolio/{id}/snapshot", response_model=SnapshotResponse)
+async def get_snapshot(id: int, timeframe: Optional[Timeframe] = None):
+    """get main portfolio metrics (equity, capital, net profit, return %)"""
+    # TODO: Return most recent snapshot for a timeframe (db table maintains equity value, total capital, net profit, return percentage)
+    # Expected response: SnapshotResponse with equity, capital, net_profit, return_pct
+    return SnapshotResponse()
 
+@router.get("/portfolio/{id}/metrics", response_model=MetricsResponse)
+async def get_metrics(id: int, timeframe: Optional[Timeframe] = None):
+    """get all other performance metrics (Sharpe, Sortino, CAGR, max drawdown, alpha, beta, std)"""
+    # TODO: Return metrics for a portfolio (Sharpe ratio, Sortino ratio, CAGR, max drawdown, alpha, beta, std)
+    # Filter by timeframe if provided
+    # Expected response: MetricsResponse with dictionary of metric_name -> value
+    return MetricsResponse()
 
-@router.get("/portfolio/net-profit", response_model=MetricResponse)
-async def get_net_profit(timeframe: Optional[Timeframe] = None):
-    """calculate and return net profit after fees and carry"""
-    # TODO: Implement net profit calculation (w/ timeframe)
-    return MetricResponse(
-        value=0.0,
-        timeframe=timeframe.value if timeframe else None
-    )
+@router.get("/portfolio/{id}/allocations/strategies", response_model=StrategyAllocationsResponse)
+async def get_strategy_allocations(id: int):
+    """get allocations grouped by strategy ID"""
+    # TODO: Implement strategy allocations retrieval for portfolio {id}
+        # Query current allocations (by strategy_id)
+        # Return mapping of strategy_id -> allocation (weight or value)
+    # Expected response: StrategyAllocationsResponse with strategy_id -> allocation mapping
+    return StrategyAllocationsResponse()
 
+@router.get("/portfolio/{id}/allocations/stocks", response_model=StockAllocationsResponse)
+async def get_stock_allocations(id: int):
+    """get allocations grouped by stock/ticker"""
+    # TODO: Implement stock allocations retrieval for portfolio {id}
+        # Query current allocations (by ticker/stock symbol)
+        # Return mapping of ticker -> allocation (weight or value)
+    # Expected response: StockAllocationsResponse with ticker -> allocation mapping
+    return StockAllocationsResponse()
 
-@router.get("/portfolio/return", response_model=MetricResponse)
-async def get_return_pct(timeframe: Optional[Timeframe] = None):
-    """get return percentage"""
-    # TODO: Implement return percentage calculation (w/ timeframe)
-    return MetricResponse(
-        value=0.0,
-        timeframe=timeframe.value if timeframe else None
-    )
-
-
-@router.get("/portfolio/sharpe", response_model=MetricResponse)
-async def get_sharpe_ratio(timeframe: Optional[Timeframe] = None):
-    """calculate and return Sharpe (within timeframe)"""
-    # TODO: Implement Sharpe ratio calculation (w/ timeframe)
-    return MetricResponse(
-        value=0.0,
-        timeframe=timeframe.value if timeframe else None
-    )
-
-
-@router.get("/portfolio/sortino", response_model=MetricResponse)
-async def get_sortino_ratio(timeframe: Optional[Timeframe] = None):
-    """calculate and return Sortino (within timeframe)"""
-    # TODO: Implement Sortino ratio calculation (w/ timeframe)
-    return MetricResponse(
-        value=0.0,
-        timeframe=timeframe.value if timeframe else None
-    )
-
-
-@router.get("/portfolio/cagr", response_model=MetricResponse)
-async def get_cagr(timeframe: Optional[Timeframe] = None):
-    """calculate and return CAGR (within timeframe)"""
-    # TODO: Implement CAGR calculation (w/ timeframe)
-    return MetricResponse(
-        value=0.0,
-        timeframe=timeframe.value if timeframe else None
-    )
-
-
-@router.get("/portfolio/max-drawdown", response_model=MetricResponse)
-async def get_max_drawdown(timeframe: Optional[Timeframe] = None):
-    """calculate and return max drawdown (within timeframe)"""
-    # TODO: Implement drawdown calculation (w/ timeframe)
-    return MetricResponse(
-        value=0.0,
-        timeframe=timeframe.value if timeframe else None
-    )
-
-
-@router.get("/portfolio/alpha", response_model=MetricResponse)
-async def get_alpha(timeframe: Optional[Timeframe] = None):
-    """calculate and return alpha (vs benchmark)"""
-    # TODO: Implement alpha calculation (w/ timeframe)
-    return MetricResponse(
-        value=0.0,
-        timeframe=timeframe.value if timeframe else None
-    )
-
-
-@router.get("/portfolio/beta", response_model=MetricResponse)
-async def get_beta(timeframe: Optional[Timeframe] = None):
-    """calculate and return beta (vs benchmark (SPX?))"""
-    # TODO: Implement beta calculation (w/ timeframe)
-    return MetricResponse(
-        value=0.0,
-        timeframe=timeframe.value if timeframe else None
-    )
-
-
-@router.get("/portfolio/std", response_model=MetricResponse)
-async def get_annual_std(timeframe: Optional[Timeframe] = None):
-    """calculate and return std (within timeframe)"""
-    # TODO: Implement standard deviation calculation (w/ timeframe)
-    return MetricResponse(
-        value=0.0,
-        timeframe=timeframe.value if timeframe else None
-    )
-
-
-@router.get("/portfolio/order-count", response_model=OrderResponse)
-async def get_orders_count(timeframe: Optional[Timeframe] = None):
-    """return count of orders (within timeframe)"""
-    # TODO: Implement order count calculation (w/ timeframe)
-    return OrderResponse(
-        count=0,
-        timeframe=timeframe.value if timeframe else None
-    )
+@router.get("/portfolio/{id}/events", response_model=EventsResponse)
+async def get_events(id: int, timeframe: Optional[Timeframe] = None):
+    """get list of portfolio events (orders, trades, type, date)"""
+    # TODO: Return list of portfolio events (orders placed, trades executed, type, date) (db table to store events)
+    # Expected response: EventsResponse
+    return EventsResponse()
