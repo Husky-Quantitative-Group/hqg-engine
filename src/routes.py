@@ -52,11 +52,25 @@ class AssetAllocationsResponse(BaseModel):
     # Expected: Dict of symbol -> allocation mapping
     allocations: Dict[str, float]
 
-class EventsResponse(BaseModel):
-    """Expected data model for portfolio events endpoint"""
-    # TODO: Define structure for events list (db table)
-    # what exactly do we want to return? (orders, trades, type, date?)
-    events: List[Tuple(str, str, str, str)]
+class ExecutionEvent(BaseModel):
+    """Data model for individual execution events (buy/sell orders)"""
+    action: str
+    symbol: str
+    quantity: float
+    timestamp: str
+
+class ExecutionEventsResponse(BaseModel):
+    """Expected data model for execution event endpoint"""
+    events: List[ExecutionEvent]
+
+class AllocationEvent(BaseModel):
+    """Data model for portfolio allocation/rebalancing events"""
+    timestamp: str
+    allocations: AssetAllocationsResponse
+
+class AllocationEventsResponse(BaseModel):
+    """Expected data model for allocation events endpoint"""
+    events: List[AllocationEvent]
 
 
 
@@ -136,9 +150,14 @@ async def get_asset_allocations(id: int):
     # Expected response: AssetAllocationsResponse with symbols -> allocation mapping
     return AssetAllocationsResponse()
 
-@router.get("/portfolio/{id}/events", response_model=EventsResponse)
-async def get_events(id: int, timeframe: Optional[Timeframe] = None):
-    """get list of portfolio events (orders, trades, type, date)"""
-    # TODO: Return list of portfolio events (orders placed, trades executed, type, date) (db table to store events)
-    # Expected response: EventsResponse
-    return EventsResponse()
+@router.get("/portfolio/{id}/events/executions", response_model=ExecutionEventsResponse)
+async def get_execution_events(id: int, timeframe: Optional[Timeframe] = None):
+    """get list of execution events"""
+    # TODO: Return list of execution events (orders placed, trades executed)
+    return ExecutionEventsResponse(events=[])
+
+@router.get("/portfolio/{id}/events/allocations", response_model=AllocationEventsResponse)
+async def get_allocation_events(id: int, timeframe: Optional[Timeframe] = None):
+    """get list of rebalance events"""
+    # TODO: Return list of rebalance events
+    return AllocationEventsResponse(events=[])
