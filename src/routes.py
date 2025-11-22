@@ -46,10 +46,10 @@ class StrategyAllocationsResponse(BaseModel):
     # Expected: Dict of strategy_id -> allocation mapping
     allocations: Dict[str, float]
 
-class StockAllocationsResponse(BaseModel):
-    """Expected data model for stock allocations"""
-    # TODO: Define structure for allocations by stock/ticker
-    # Expected: Dict of ticker -> allocation mapping
+class AssetAllocationsResponse(BaseModel):
+    """Expected data model for asset allocations"""
+    # TODO: Define structure for allocations by asset symbol
+    # Expected: Dict of symbol -> allocation mapping
     allocations: Dict[str, float]
 
 class EventsResponse(BaseModel):
@@ -127,14 +127,14 @@ async def get_strategy_allocations(id: int):
     # Expected response: StrategyAllocationsResponse with strategy_id -> allocation mapping
     return StrategyAllocationsResponse()
 
-@router.get("/portfolio/{id}/allocations/stocks", response_model=StockAllocationsResponse)
-async def get_stock_allocations(id: int):
-    """get allocations grouped by stock/ticker"""
-    # TODO: Implement stock allocations retrieval for portfolio {id}
-        # Query current allocations (by ticker/stock symbol)
-        # Return mapping of ticker -> allocation (weight or value)
-    # Expected response: StockAllocationsResponse with ticker -> allocation mapping
-    return StockAllocationsResponse()
+@router.get("/portfolio/{id}/allocations/assets", response_model=AssetAllocationsResponse)
+async def get_asset_allocations(id: int):
+    """get allocations grouped by symbols"""
+    # TODO: Implement asset allocations retrieval for portfolio {id}
+        # Query current allocations (by symbol)
+        # Return mapping of symbols -> allocation (weight or value)
+    # Expected response: AssetAllocationsResponse with symbols -> allocation mapping
+    return AssetAllocationsResponse()
 
 @router.get("/portfolio/{id}/events", response_model=EventsResponse)
 async def get_events(id: int, timeframe: Optional[Timeframe] = None):
