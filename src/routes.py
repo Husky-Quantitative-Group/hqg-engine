@@ -16,11 +16,14 @@ class TradeResponse(BaseModel):
     success: bool
     message: str
 
+class EquityPoint(BaseModel):
+    """Expected data model for equity curve data points"""
+    timestamp: str
+    equity_value: float
+
 class EquityResponse(BaseModel):
     """Expected data model for equity curve endpoint"""
-    # TODO: Define structure for time series data points (to make: database table)
-    # Expected: List of (timestamp, equity_value) pairs or similar
-    data: List[Tuple(str, float)]
+    data: List[EquityPoint]
 
 class SnapshotResponse(BaseModel):
     """Expected data model for portfolio snapshot endpoint"""
