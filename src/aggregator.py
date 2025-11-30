@@ -1,4 +1,4 @@
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple
 
 def aggregate_allocations(allocations: List[Tuple[str, List[Tuple[str, float]], float]]):
     """

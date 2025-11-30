@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, Dict, Any
 
-class MarketDataProvider(ABC):
+class MarketData(ABC):
     """Abstract the interface for streaming market data"""
     
     @abstractmethod
