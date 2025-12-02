@@ -26,5 +26,5 @@ class Executor(ABC):
         pass
 
     @abstractmethod
-    async def rebalance(self, target_weights, portfolio_value):
+    async def rebalance(self, target_weights, portfolio_value, market_data={}):
         pass

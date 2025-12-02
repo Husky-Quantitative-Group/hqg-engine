@@ -69,3 +69,11 @@ class IBKRMarketData(MarketData):
             self.ib.cancelMktData(ticker.contract)
         self._tickers.clear()
 
+
+    # TODO, if we want to keep the same structure in main
+    async def pause_stream(self):
+        pass
+    async def resume_stream(self):
+        pass
+    async def clear_queue(self):
+        pass

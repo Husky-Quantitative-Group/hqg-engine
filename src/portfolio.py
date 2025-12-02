@@ -1,10 +1,12 @@
 from pathlib import Path
 import yaml
+import logging
 
 from hqg_algorithms import Slice, PortfolioView
 from src.aggregator import aggregate_allocations
 from src.strategies import ClassicFinance_SPY_IEF, SMA_AAPL
 
+logger = logging.getLogger(__name__)
 class Portfolio:
     def __init__(self, config_path="config/portfolio.yaml"):
         self.strategies = []
@@ -12,8 +14,8 @@ class Portfolio:
         self.config_path = config_path
         self.load_config()
         self.init_strategies()
-        
 
+        
     def load_config(self):
         config_file = Path(self.config_path)
         
@@ -22,6 +24,7 @@ class Portfolio:
             config_file = Path(__file__).parent / self.config_path
         
         if not config_file.exists():
+            logger.error(f"Config file not found: {self.config_path}")
             raise FileNotFoundError(f"Config file not found: {self.config_path}")
         
         with open(config_file, 'r') as f:
@@ -30,6 +33,7 @@ class Portfolio:
         self.strategy_configs = config.get('strategies', [])
         
         if not self.strategy_configs:
+            logger.error("No strategies configured in the config file")
             raise ValueError("No strategies configured in the config file")
     
 
@@ -42,10 +46,10 @@ class Portfolio:
         for config in self.strategy_configs:
             strategy_id = config['id']
             class_name = config['class_name']
-            #tickers = config['tickers']
             portfolio_weight = config['portfolio_weight']
 
             if class_name not in strat_map:
+                logger.error(f"Unknown strategy class: {class_name}")
                 raise ValueError(f"Unknown strategy class: {class_name}")
             
             StrategyClass = strat_map[class_name]
@@ -56,44 +60,68 @@ class Portfolio:
                 'id': strategy_id,
                 'instance': strategy_instance,
                 'weight': portfolio_weight,
-                'tickers': universe
+                'universe': universe
             })
             
-            print(f"Initialized strategy: {strategy_id} ({class_name}) with weight {portfolio_weight}")
+            logger.info(f"Initialized strategy: {strategy_id} ({class_name}) with weight {portfolio_weight:.2%}, universe: {universe}")
     
 
     def get_tickers(self):
         all_tickers = set()
         for strategy in self.strategies:
-            all_tickers.update(strategy['tickers'])
+            all_tickers.update(strategy['universe'])
+        logger.debug(f"Universe contains {len(all_tickers)} tickers: {sorted(all_tickers)}")
         return list(all_tickers)
     
+    def partition_data(universe, data) -> Slice:  #???
+        # TODO
+        # only gets data in universe
+        pass
+
+    def cadence_handler():  #???
+        # TODO
+        # do we call strat or just return last call's weights?
+        pass
     
     async def on_data(self, data):
         strategy_results = []
     
         for strategy in self.strategies:
+            # TODO:
+            # in this loop, call strategy_instance to get cadence - have some internal time / cadence manager so we only call a strat 1x a day/hour/min 
+            #   & then keep those weights static. 
+            # ie, if is_ran is true and next_time > cur_time, append prev_weights to strategry_results so we maintain the position
+
             strategy_id = strategy['id']
             strategy_instance = strategy['instance']
             aum_weight = strategy['weight']
-            
+            universe = strategy['universe']
+
+            # TODO send only data in universe
+
             slice_obj = Slice(data)
-            portfolio_obj = PortfolioView(
+            portfolio_obj = PortfolioView(  # TODO: Portfolio should be managing a PortfolioView, not passing in shell
                 equity=0.0,
                 cash=0.0,
                 positions={},
                 weights={}
             )
+
+            try:
+                allocations_dict = strategy_instance.on_data(slice_obj, portfolio_obj)
+            except Exception as e:
+                logger.error(f"Strategy {strategy_id} failed: {e}", exc_info=True)
+                continue
             
-            allocations_dict = strategy_instance.on_data(slice_obj, portfolio_obj)
-            
+    
             if allocations_dict is None:
+                logger.warning(f"Strategy {strategy_id} returned None allocations")
                 continue
             
             allocations = list(allocations_dict.items())
             strategy_results.append((strategy_id, allocations, aum_weight))
-            print(f"Strategy {strategy_id} allocations: {allocations}")
-        
+            logger.info(f"Strategy {strategy_id} allocations: {allocations}")
+
         target_weights = aggregate_allocations(strategy_results)
-        print(f"Aggregated target weights: {target_weights}")
+        logger.info(f"Aggregated target weights: {target_weights}")
         return target_weights

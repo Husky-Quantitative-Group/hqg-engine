@@ -96,13 +96,14 @@ class AlpacaExecutor(Executor):
             raise
 
 
-    async def rebalance(self, target_weights: Dict[str, float], portfolio_value: float) -> None:
+    async def rebalance(self, target_weights: Dict[str, float], portfolio_value: float, market_data: dict[str, float]) -> None:
         """
         Rebalance the portfolio to target weights
         
         Args:
             target_weights: Dictionary of {symbol: weight} (e.g., {'AAPL': 0.3, 'MSFT': 0.3})
             portfolio_value: Current total value of portfolio
+            market_data: Dict of {symbol: price} (e.g., {'AAPL': 200.03, ...})
         """
         try:
             if target_weights is None:
@@ -114,21 +115,10 @@ class AlpacaExecutor(Executor):
             all_symbols = set(target_weights.keys()) | set(current_positions.keys())
             
             # Maintain cash buffer
-            portfolio_value = portfolio_value * 0.95
-            total_weight = sum(target_weights.values())
-            
-            # Get current prices for all symbols
-            prices = {}
-            for symbol in all_symbols:
-                try:
-                    # TODO: fix get live data
-                    latest_bar = self.trading_client.get_latest_bar(symbol)
-                    if latest_bar and latest_bar.close:
-                        prices[symbol] = float(latest_bar.close)
-                    else:
-                        logger.warning(f"No price data available for {symbol}")
-                except Exception as e:
-                    logger.warning(f"Could not fetch price for {symbol}: {e}")
+            portfolio_value = portfolio_value * 0.95    # placeholder
+            total_weight = sum(target_weights.values()) # should < 1
+
+            prices = {snapshot['symbol']: snapshot['price'] for snapshot in market_data.values()}
             
             # Calculate orders to place
             orders_to_place = []

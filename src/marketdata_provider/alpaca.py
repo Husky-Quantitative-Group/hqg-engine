@@ -5,6 +5,9 @@ from typing import AsyncIterator, Dict, List
 from alpaca.data.live import StockDataStream
 from alpaca.data.requests import StockLatestQuoteRequest
 from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data import StockLatestTradeRequest
+from alpaca.data.historical import StockHistoricalDataClient
+
 from .base import MarketData
 
 logger = logging.getLogger(__name__)
@@ -24,14 +27,14 @@ class AlpacaMarketData(MarketData):
         self._running = False
         self._quote_queue = asyncio.Queue()
         self._stream_task = None
+        self._ispaused = False
     
     
     async def get_price(self, symbol: str) -> Dict:
         try:
-            request = StockLatestQuoteRequest(symbol_or_symbols=symbol)
-            # TODO: fix get live data
-            quote = await self.trading_client.get_stock_latest_quote(request)
-            
+            request = StockLatestTradeRequest(symbol_or_symbols=symbol)
+            quote = self.data_client.get_stock_latest_trade(request)
+
             if not quote or symbol not in quote:
                 logger.warning(f"No quote data for {symbol}")
                 return None
@@ -44,7 +47,6 @@ class AlpacaMarketData(MarketData):
                 'bid': quote_data.bid_price,
                 'ask': quote_data.ask_price,
                 'timestamp': datetime.now(),
-                'volume': quote_data.bid_size + quote_data.ask_size,
                 'source': 'alpaca'
             }
             
@@ -54,7 +56,7 @@ class AlpacaMarketData(MarketData):
 
 
     async def stream_prices(self, symbols: List[str]) -> AsyncIterator[Dict]:
-        """Stream prices - this is now an async generator"""
+        """Async generator"""
         try:
             self._running = True
             logger.info(f"Starting price stream for {symbols}")
@@ -79,13 +81,25 @@ class AlpacaMarketData(MarketData):
         finally:
             await self.cleanup()
 
+    async def pause_stream(self):
+        self._ispaused = True
+    
+    async def resume_stream(self):
+        self._ispaused = False
+    
+    async def clear_queue(self):
+        self._quote_queue = asyncio.Queue()
 
     async def _on_quote(self, data):
         """Handle incoming quote data"""
+        if self._ispaused:  # ignore so Q doesnt fill with stale data
+            return
+        
         try:
             quote_dict = {
                 'symbol': data.symbol,
                 'price': data.ask_price,
+                'close': data.ask_price,    # no "close" bc snapshot, this is suboptimal. may need to change hqg slice
                 'bid': data.bid_price,
                 'ask': data.ask_price,
                 'bid_size': data.bid_size,
@@ -94,6 +108,15 @@ class AlpacaMarketData(MarketData):
                 'volume': data.bid_size + data.ask_size,
                 'source': 'alpaca'
             }
+
+            last = self._tickers.get(data.symbol)
+            if last:
+                # Ignore exact duplicates
+                if (last['bid'] == quote_dict['bid'] and
+                    last['ask'] == quote_dict['ask'] and
+                    last['bid_size'] == quote_dict['bid_size'] and
+                    last['ask_size'] == quote_dict['ask_size']):
+                    return
             
             self._tickers[data.symbol] = quote_dict
             await self._quote_queue.put(quote_dict)

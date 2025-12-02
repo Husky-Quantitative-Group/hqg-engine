@@ -16,6 +16,17 @@ class MarketData(ABC):
         pass
     
     @abstractmethod
-    async def cleanup(self):
+    async def pause_stream(self):
         pass
 
+    @abstractmethod
+    async def resume_stream(self):
+        pass
+
+    @abstractmethod
+    async def clear_queue(self):
+        pass
+
+    @abstractmethod
+    async def cleanup(self):
+        pass

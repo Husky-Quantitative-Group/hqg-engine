@@ -119,29 +119,35 @@ class Engine():
             logger.info("Starting trading engine")
             market_data = {}
             ticker_set = set(universe)
-            
+
             async for snapshot in data_provider.stream_prices(universe):
-                # Accumulate market data
                 if snapshot is not None:
-                    market_data[snapshot['symbol']] = snapshot
+                        market_data[snapshot['symbol']] = snapshot
                 
-                # Process when we have data for ALL tickers
                 if set(market_data.keys()) >= ticker_set:
-                    logger.info(f"Rebalancing with data for {list(market_data.keys())}")
+                    await data_provider.pause_stream()
 
                     # Get target weights from portfolio
                     target_weights = await portfolio.on_data(market_data)
-                    
+
                     # Get current account value
                     portfolio_value = await exec_provider.get_account_value()
                     logger.info(f"Current account value: ${portfolio_value:,.2f}")
                     
                     # Execute rebalancing
                     logger.info(f"Rebalancing with target weights:{target_weights}")
-                    await exec_provider.rebalance(target_weights, portfolio_value)
+                    await exec_provider.rebalance(target_weights, portfolio_value, market_data)
                     
-                    # Reset market data for next cycle
+                    # Reset market data & wait 1 min before continuing
+                        # unless we want to use stream to calc ohlc... (currently only snapshot at 1 min intervals, not "1 min data")
+                    await asyncio.sleep(60)  
                     market_data = {}
+                    
+                    # clear stale
+                    await data_provider.clear_queue()
+
+                    # resume provider
+                    await data_provider.resume_stream()
                 
         except KeyboardInterrupt:
             logger.info("Stopped from keyboard interrupt")
