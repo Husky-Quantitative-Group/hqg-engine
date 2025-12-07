@@ -1,20 +1,28 @@
 from pathlib import Path
 import yaml
 import logging
+from enum import Enum
+from datetime import datetime
 
-from hqg_algorithms import Slice, PortfolioView
+from hqg_algorithms import Slice, PortfolioView, Cadence
 from src.aggregator import aggregate_allocations
 from src.strategies import ClassicFinance_SPY_IEF, SMA_AAPL
 
 logger = logging.getLogger(__name__)
+
+class CadenceDecision(Enum):
+    RUN = "run"
+    PREV = "prev"
+    WAIT = "wait"
+
 class Portfolio:
     def __init__(self, config_path="config/portfolio.yaml"):
         self.strategies = []
         self.strategy_configs = []
         self.config_path = config_path
+        self._strategy_state = {}
         self.load_config()
         self.init_strategies()
-
         
     def load_config(self):
         config_file = Path(self.config_path)
@@ -78,10 +86,24 @@ class Portfolio:
         # only gets data in universe
         pass
 
-    def cadence_handler():  #???
-        # TODO
-        # do we call strat or just return last call's weights?
-        pass
+    def cadence_handler(self, strategy_id, cadence, current_time):
+        if strategy_id not in self._strategy_state:
+            self._strategy_state[strategy_id] = {'last_run_time': None}
+        
+        state = self._strategy_state[strategy_id]
+        last_run_time = state['last_run_time']
+            
+        # if strategy never ran before, either wait, or run (if this can be the initial call phase)
+        if last_run_time is None:
+            return CadenceDecision.WAIT
+            
+        # check if cadence period has elapsed
+        next_run_time = last_run_time + (cadence.bar_size * cadence.exec_lag_bars)
+        if current_time >= next_run_time:
+            state['last_run_time'] = current_time # maybe delegate this elsewhere (TBD)
+            return CadenceDecision.RUN
+        
+        return CadenceDecision.PREV
     
     async def on_data(self, data):
         strategy_results = []
