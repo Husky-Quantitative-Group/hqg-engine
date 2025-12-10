@@ -20,7 +20,7 @@ class Portfolio:
         self.strategies = []
         self.strategy_configs = []
         self.config_path = config_path
-        self._strategy_state = {} # {strategy_id : {cadence=timedelta(), last_called=time.time(), last_output=[]}}
+        self._strategy_state = {} # {strategy_id : {cadence=timedelta(), last_called=time.time(), last_output=[(ticker, weight)]} }
         self.load_config()
         self.init_strategies()
         
@@ -100,7 +100,6 @@ class Portfolio:
             
         # check if cadence period has elapsed, or this is the first run
         if last_called is None:
-            state['last_called'] = current_time
             return CadenceDecision.RUN
 
         next_call = last_called + (cadence.bar_size * cadence.exec_lag_bars)
@@ -113,32 +112,44 @@ class Portfolio:
         strategy_results = []
     
         for strategy in self.strategies:
-            # TODO:
-            # in this loop, call strategy_instance to get cadence - have some internal time / cadence manager so we only call a strat 1x a day/hour/min 
-            #   & then keep those weights static. 
-            # ie, if is_ran is true and next_time > cur_time, append prev_weights to strategry_results so we maintain the position
-
+            # call strategy_instance to get cadence & then keep those weights static if cadence has not elapsed
+            # ie, if decision is RUN and next_time > cur_time, append prev_weights to strategry_results so we maintain the position
+            
             strategy_id = strategy['id']
             strategy_instance = strategy['instance']
             aum_weight = strategy['weight']
             universe = strategy['universe']
 
-            # TODO send only data in universe
+            cadence = strategy_instance.cadence()
+            current_time = datetime.now()
+            decision = self.cadence_handler(strategy_id, cadence, current_time)
+            state = self._strategy_state[strategy_id]
 
-            slice_obj = Slice(data)
-            portfolio_obj = PortfolioView(  # TODO: Portfolio should be managing a PortfolioView, not passing in shell
-                equity=0.0,
-                cash=0.0,
-                positions={},
-                weights={}
-            )
+            allocations_dict = None
 
-            try:
-                allocations_dict = strategy_instance.on_data(slice_obj, portfolio_obj)
-            except Exception as e:
-                logger.error(f"Strategy {strategy_id} failed: {e}", exc_info=True)
-                continue
+            if decision == CadenceDecision.RUN:
+                # TODO send only data in universe
+
+                slice_obj = Slice(data)
+                portfolio_obj = PortfolioView(  # TODO: Portfolio should be managing a PortfolioView, not passing in shell
+                    equity=0.0,
+                    cash=0.0,
+                    positions={},
+                    weights={}
+                )
+
+                try:
+                    allocations_dict = strategy_instance.on_data(slice_obj, portfolio_obj)
+                except Exception as e:
+                    logger.error(f"Strategy {strategy_id} failed: {e}", exc_info=True)
+                    continue
+
+                state['last_output'] = allocations_dict
+                state['last_called'] = current_time
             
+            elif decision == CadenceDecision.PREV:  # PREV - use previous output (do not execute strategy)
+                allocations_dict = state['last_output']
+                state['last_called'] = current_time
     
             if allocations_dict is None:
                 logger.warning(f"Strategy {strategy_id} returned None allocations")
