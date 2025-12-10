@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class CadenceDecision(Enum):
     RUN = "run"
     PREV = "prev"
-    WAIT = "wait"
+    # WAIT = "wait"
 
 class Portfolio:
     def __init__(self, config_path="config/portfolio.yaml"):
@@ -93,13 +93,9 @@ class Portfolio:
         state = self._strategy_state[strategy_id]
         last_run_time = state['last_run_time']
             
-        # if strategy never ran before, either wait, or run (if this can be the initial call phase)
-        if last_run_time is None:
-            return CadenceDecision.WAIT
-            
-        # check if cadence period has elapsed
+        # check if cadence period has elapsed, or this is the first run
         next_run_time = last_run_time + (cadence.bar_size * cadence.exec_lag_bars)
-        if current_time >= next_run_time:
+        if current_time >= next_run_time or last_run_time is None:
             state['last_run_time'] = current_time # maybe delegate this elsewhere (TBD)
             return CadenceDecision.RUN
         
