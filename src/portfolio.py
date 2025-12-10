@@ -20,7 +20,7 @@ class Portfolio:
         self.strategies = []
         self.strategy_configs = []
         self.config_path = config_path
-        self._strategy_state = {}
+        self._strategy_state = {} # {strategy_id : {cadence=timedelta(), last_called=time.time(), last_output=[]}}
         self.load_config()
         self.init_strategies()
         
@@ -88,15 +88,23 @@ class Portfolio:
 
     def cadence_handler(self, strategy_id, cadence, current_time):
         if strategy_id not in self._strategy_state:
-            self._strategy_state[strategy_id] = {'last_run_time': None}
+            self._strategy_state[strategy_id] = {
+                'cadence': cadence,
+                'last_called': None,
+                'last_output': []
+            }
         
         state = self._strategy_state[strategy_id]
-        last_run_time = state['last_run_time']
+        last_called = state['last_called']
+        last_output = state['last_output']
             
         # check if cadence period has elapsed, or this is the first run
-        next_run_time = last_run_time + (cadence.bar_size * cadence.exec_lag_bars)
-        if current_time >= next_run_time or last_run_time is None:
-            state['last_run_time'] = current_time # maybe delegate this elsewhere (TBD)
+        if last_called is None:
+            state['last_called'] = current_time
+            return CadenceDecision.RUN
+
+        next_call = last_called + (cadence.bar_size * cadence.exec_lag_bars)
+        if current_time >= next_call:
             return CadenceDecision.RUN
         
         return CadenceDecision.PREV
