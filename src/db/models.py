@@ -3,6 +3,10 @@ from sqlalchemy import Column, BigInteger, Identity, String, Timestamp, Boolean,
 
 Base = declarative_base()
 
+class Action(Enum):
+    BUY = "buy"
+    SELL = "sell"
+
 class Portfolio(Base):
     __tablename__ = "portfolios"
     
@@ -60,7 +64,7 @@ class ExecutionEvent(Base):
     event_id = Column(BigInteger, Identity(always=True), primary_key=True)
     portfolio_id = Column(BigInteger, nullable=False)
     timestamp = Column(Timestamp, nullable=False)
-    action = Column(BigInteger, nullable=False)
+    action = Column(PgEnum(Action, name="action_enum"), nullable=False)
     symbol = Column(String(35), nullable=False)
     quantity = Column(Numeric(18, 6), nullable=False)
     
