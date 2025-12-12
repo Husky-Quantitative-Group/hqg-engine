@@ -1,9 +1,39 @@
 from enum import Enum
 from typing import Optional, List, Dict
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Depends
+from datetime import date, datetime, timedelta
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from src.database import get_session
+
+from src.db.models import (
+    Portfolio,
+    Instrument,
+    PerformanceSnapshot,
+    HoldingsSnapshot,
+    StrategyWeightsSnapshot,
+    ExecutionEvent,
+    AllocationEvent,
+    Action
+)
 
 router = APIRouter()
+
+
+def timeframe_to_date_range(timeframe: Optional[Timeframe]):
+    if timeframe is None:
+        return None # update to what we want our default to be
+    
+    today = date.today()
+    
+    if timeframe == Timeframe.THREE_MONTHS:
+        return today - timedelta(days=90)
+    elif timeframe == Timeframe.SIX_MONTHS:
+        return today - timedelta(days=180)
+    elif timeframe == Timeframe.YEAR_TO_DATE:
+        return date(today.year, 1, 1)
+    return None
 
 class Timeframe(str, Enum):
     """current timeframe options for PM endpoints (subject to change, based on current frontend)"""
@@ -75,23 +105,42 @@ class AllocationEventsResponse(BaseModel):
 
 
 @router.post("/portfolio/{id}/stop", response_model=TradeResponse)
-async def stop_trading(id: int):
-    """cancel pending orders and prevent new ones"""
-    # TODO: Implement stop trading logic
-        # Cancel all pending orders for the portfolio
-        # Set portfolio state to prevent new orders
-        # Return success status
+async def stop_trading(id: int, session: AsyncSession = Depends(get_session)):
+    result = await session.execute(
+        select(Portfolio).where(Portfolio.portfolio_id == id)
+    )
+    
+    portfolio = result.scalar_one_or_none()
+
+    if portfolio is None:
+        raise HTTPException(status_code=404, detail=f"Portfolio {id} not found")
+
+    # ASSUMPTION: some "stop_trading(portfolio_id)" will be defined in src/portfolio.py (add import here after)
+    # stop_trading(id)
+    portfolio.is_active = False
+    await session.commit()
+    
     return TradeResponse(
         success=True,
         message="Trading stopped successfully"
     )
 
 @router.post("/portfolio/{id}/resume", response_model=TradeResponse)
-async def resume_trading(id: int):
-    """allow new orders to be placed"""
-    # TODO: Implement resume trading logic
-        # Set portfolio state to allow new orders
-        # Return success status
+async def resume_trading(id: int, session: AsyncSession = Depends(get_session)):
+    result = await session.execute(
+        select(Portfolio).where(Portfolio.portfolio_id == id)
+    )
+    
+    portfolio = result.scalar_one_or_none()
+
+    if portfolio is None:
+        raise HTTPException(status_code=404, detail=f"Portfolio {id} not found")
+
+    # ASSUMPTION: same as for stop_trading endpt.
+    # resume_trading(id)
+    portfolio.is_active = True
+    await session.commit()
+    
     return TradeResponse(
         success=True,
         message="Trading resumed successfully"
