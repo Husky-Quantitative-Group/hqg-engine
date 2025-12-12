@@ -147,11 +147,19 @@ async def resume_trading(id: int, session: AsyncSession = Depends(get_session)):
     )
 
 @router.post("/portfolio/{id}/liquidate", response_model=TradeResponse)
-async def liquidate_all(id: int):
-    """close all open positions"""
-    # TODO: Implement liquidation logic
-        # Close all open positions
-        # Return success status
+async def liquidate_all(id: int, session: AsyncSession = Depends(get_session)):
+    result = await session.execute(
+        select(Portfolio).where(Portfolio.portfolio_id == id)
+    )
+    
+    portfolio = result.scalar_one_or_none()
+
+    if portfolio is None:
+        raise HTTPException(status_code=404, detail=f"Portfolio {id} not found")
+
+    # ASSUMPTION: same as for stop and resume_trading endpts.
+    # liquidate(id)
+    
     return TradeResponse(
         success=True,
         message="Liquidation initiated successfully"
