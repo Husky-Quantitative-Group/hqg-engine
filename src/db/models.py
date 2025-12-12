@@ -1,5 +1,7 @@
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy import Column, BigInteger, Identity, String, Timestamp, Boolean, Date, Numeric,PrimaryKeyConstraint, ForeignKey, CheckConstraint, JSON
+from enum import Enum
+from sqlalchemy.dialects.postgresql import ENUM as PgEnum
 
 Base = declarative_base()
 
