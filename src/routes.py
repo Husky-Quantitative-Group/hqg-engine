@@ -163,7 +163,7 @@ async def liquidate_all(id: int, session: AsyncSession = Depends(get_session)):
 
 @router.get("/portfolio/{id}/equity", response_model=EquityResponse)
 async def get_equity(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
-    portfolio = await get_portfolio(id, session)
+    await get_portfolio(id, session)
     query = select(PerformanceSnapshot).where(PerformanceSnapshot.portfolio_id == id)
 
     start_date = timeframe_to_date_range(timeframe)
@@ -188,7 +188,7 @@ async def get_equity(id: int, timeframe: Optional[Timeframe] = None, session: As
 @router.get("/portfolio/{id}/snapshot", response_model=SnapshotResponse)
 async def get_snapshot(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
     """get main portfolio metrics (equity, capital, net profit, return %)"""
-    portfolio = await get_portfolio(id, session)
+    await get_portfolio(id, session)
     query = select(PerformanceSnapshot).where(PerformanceSnapshot.portfolio_id == id)
 
     start_date = timeframe_to_date_range(timeframe)
@@ -239,7 +239,7 @@ async def get_snapshot(id: int, timeframe: Optional[Timeframe] = None, session: 
 @router.get("/portfolio/{id}/metrics", response_model=MetricsResponse)
 async def get_metrics(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
     """get other performance metrics (sharpe, sortino, CAGR, max drawdown, alpha, beta, std)"""
-    portfolio = await get_portfolio(id, session)
+    await get_portfolio(id, session)
     
     # get performance snapshots (within timeframe)
     query = select(PerformanceSnapshot).where(PerformanceSnapshot.portfolio_id == id)
@@ -261,7 +261,7 @@ async def get_metrics(id: int, timeframe: Optional[Timeframe] = None, session: A
     returns = []
     for i in range(1, len(equity_values)): # possible check for divide by 0?
         ret = (equity_values[i] - equity_values[i-1]) / equity_values[i-1]
-        returns.append(ret)``
+        returns.append(ret)
     
     # calculate CAGR
     initial_value = equity_values[0]
@@ -307,13 +307,25 @@ async def get_metrics(id: int, timeframe: Optional[Timeframe] = None, session: A
     })
 
 @router.get("/portfolio/{id}/allocations/strategies", response_model=StrategyAllocationsResponse)
-async def get_strategy_allocations(id: int):
-    """get allocations grouped by strategy ID"""
-    # TODO: Implement strategy allocations retrieval for portfolio {id}
-        # Query current allocations (by strategy_id)
-        # Return mapping of strategy_id -> allocation (weight or value)
-    # Expected response: StrategyAllocationsResponse with strategy_id -> allocation mapping
-    return StrategyAllocationsResponse()
+async def get_strategy_allocations(id: int, session: AsyncSession = Depends(get_session)):
+    """get allocations grouped by strategy name"""
+    await get_portfolio(id, session)
+    
+    # get most recent snapshot date
+    query = select(StrategyWeightsSnapshot).where(StrategyWeightsSnapshot.portfolio_id == id)
+    query = query.order_by(StrategyWeightsSnapshot.as_of.desc())
+    result = await session.execute(query)
+    snapshots = result.scalars().all()
+    
+    if not snapshots:
+        return StrategyAllocationsResponse(allocations={})
+    
+    # get most recent & filter to only those snapshots
+    most_recent = snapshots[0].as_of
+    weights = [snapshot for snapshot in snapshots if snapshot.as_of == most_recent]
+    
+    allocations = {snapshot.strategy_name : float(snapshot.weight) for snapshot in weights}
+    return StrategyAllocationsResponse(allocations=allocations)
 
 @router.get("/portfolio/{id}/allocations/assets", response_model=AssetAllocationsResponse)
 async def get_asset_allocations(id: int):
