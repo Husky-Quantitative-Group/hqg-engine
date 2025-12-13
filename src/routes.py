@@ -347,10 +347,31 @@ async def get_asset_allocations(id: int, session: AsyncSession = Depends(get_ses
     return AssetAllocationsResponse(allocations=allocations)
 
 @router.get("/portfolio/{id}/events/executions", response_model=ExecutionEventsResponse)
-async def get_execution_events(id: int, timeframe: Optional[Timeframe] = None):
+async def get_execution_events(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
     """get list of execution events"""
     # TODO: Return list of execution events (orders placed, trades executed)
-    return ExecutionEventsResponse(events=[])
+    await get_portfolio(id, session)
+
+    query = select(ExecutionEvent).where(ExecutionEvent.portfolio_id == id)
+    start_date = timeframe_to_date_range(timeframe)
+    query = query.where(ExecutionEvent.timestamp >= start_date)
+    
+    query = query.order_by(ExecutionEvent.timestamp.desc())
+    result = await session.execute(query)
+    execution_events = result.scalars().all()
+
+    if execution_events is None:
+        return ExecutionEventsResponse(events=[])
+    
+    events = [
+        ExecutionEvent(
+            action=execution_event.action.value,
+            symbol=execution_event.symbol,
+            quantity=float(execution_event.quantity),
+            timestamp=execution_event.timestamp.isoformat()
+        ) for execution_event in execution_events
+    ]
+    return ExecutionEventsResponse(events=events)
 
 @router.get("/portfolio/{id}/events/allocations", response_model=AllocationEventsResponse)
 async def get_allocation_events(id: int, timeframe: Optional[Timeframe] = None):
