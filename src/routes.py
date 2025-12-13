@@ -1,5 +1,6 @@
 from enum import Enum
 from typing import Optional, List, Dict
+import statistics
 from fastapi import APIRouter, HTTPException, Depends
 from datetime import date, datetime, timedelta
 from pydantic import BaseModel
@@ -236,12 +237,74 @@ async def get_snapshot(id: int, timeframe: Optional[Timeframe] = None, session: 
     )
 
 @router.get("/portfolio/{id}/metrics", response_model=MetricsResponse)
-async def get_metrics(id: int, timeframe: Optional[Timeframe] = None):
-    """get all other performance metrics (Sharpe, Sortino, CAGR, max drawdown, alpha, beta, std)"""
-    # TODO: Return metrics for a portfolio (Sharpe ratio, Sortino ratio, CAGR, max drawdown, alpha, beta, std)
-    # Filter by timeframe if provided
-    # Expected response: MetricsResponse with dictionary of metric_name -> value
-    return MetricsResponse()
+async def get_metrics(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
+    """get other performance metrics (sharpe, sortino, CAGR, max drawdown, alpha, beta, std)"""
+    portfolio = await get_portfolio(id, session)
+    
+    # get performance snapshots (within timeframe)
+    query = select(PerformanceSnapshot).where(PerformanceSnapshot.portfolio_id == id)
+    start_date = timeframe_to_date_range(timeframe)
+    query = query.where(PerformanceSnapshot.as_of >= start_date)
+    query = query.order_by(PerformanceSnapshot.as_of)
+    
+    result = await session.execute(query)
+    snapshots = result.scalars().all()
+    
+    if len(snapshots) < 2: # need at least 2 data points
+        return MetricsResponse(metrics={"sharpe": 0.0, "sortino": 0.0, "cagr": 0.0, "max_drawdown": 0.0, "alpha": 0.0, "beta": 0.0, "std": 0.0})
+    
+    # equity values and dates
+    equity_values = [float(snapshot.equity) for snapshot in snapshots]
+    dates = [snapshot.as_of for snapshot in snapshots]
+    
+    # calculate returns
+    returns = []
+    for i in range(1, len(equity_values)): # possible check for divide by 0?
+        ret = (equity_values[i] - equity_values[i-1]) / equity_values[i-1]
+        returns.append(ret)``
+    
+    # calculate CAGR
+    initial_value = equity_values[0]
+    final_value = equity_values[-1]
+    days_diff = (dates[-1] - dates[0]).days
+    years = days_diff / 365 if days_diff > 0 else 1
+    cagr = ((final_value / initial_value) ** (1 / years) - 1) if initial_value > 0 else 0
+    
+    # calculate drawdown
+    peak = initial_value
+    max_drawdown = 0.0
+    for value in equity_values:
+        if value > peak:
+            peak = value
+        drawdown = (peak - value) / peak if peak > 0 else 0.0
+        if drawdown > max_drawdown:
+            max_drawdown = drawdown
+    
+    # calculate std
+    std = statistics.stdev(returns)
+    
+    # calculate sharpe ratio (temporary risk-free = 0; should we store T-Bill rate in db as well?)
+    mean_return = statistics.mean(returns)
+    sharpe = (mean_return / std)
+    
+    # calculate sortino
+    downside_returns = [r for r in returns if r < 0]
+    downside_std = statistics.stdev(downside_returns)
+    sortino = (mean_return / downside_std)
+    
+    # alpha and beta, TBD (0.0 for now)
+    alpha = 0.0 # similar to sharpe, should we store a benchmark rate in db?
+    beta = 0.0 # ... also
+    
+    return MetricsResponse(metrics={
+        "sharpe": sharpe,
+        "sortino": sortino,
+        "cagr": cagr,
+        "max_drawdown": max_drawdown,
+        "alpha": alpha,
+        "beta": beta,
+        "std": std
+    })
 
 @router.get("/portfolio/{id}/allocations/strategies", response_model=StrategyAllocationsResponse)
 async def get_strategy_allocations(id: int):
