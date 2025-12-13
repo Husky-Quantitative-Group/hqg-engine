@@ -374,7 +374,25 @@ async def get_execution_events(id: int, timeframe: Optional[Timeframe] = None, s
     return ExecutionEventsResponse(events=events)
 
 @router.get("/portfolio/{id}/events/allocations", response_model=AllocationEventsResponse)
-async def get_allocation_events(id: int, timeframe: Optional[Timeframe] = None):
+async def get_allocation_events(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
     """get list of rebalance events"""
-    # TODO: Return list of rebalance events
-    return AllocationEventsResponse(events=[])
+    await get_portfolio(id, session)
+
+    query = select(AllocationEvent).where(AllocationEvent.portfolio_id == id)
+    start_date = timeframe_to_date_range(timeframe)
+    query = query.where(AllocationEvent.timestamp >= start_date)
+    
+    query = query.order_by(AllocationEvent.timestamp.desc())
+    result = await session.execute(query)
+    allocation_events = result.scalars().all()
+
+    if allocation_events is None:
+        return AllocationEventsResponse(events=[])
+    
+    events = [
+        AllocationEvent(
+            timestamp=allocation_event.timestamp.isoformat(),
+            allocations=allocation_event.allocations
+        ) for allocation_event in allocation_events
+    ]
+    return AllocationEventsResponse(events=events)
