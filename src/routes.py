@@ -20,7 +20,6 @@ from src.db.models import (
 
 router = APIRouter()
 
-
 def timeframe_to_date_range(timeframe: Optional[Timeframe]):
     if timeframe is None:
         return None # update to what we want our default to be
@@ -33,7 +32,6 @@ def timeframe_to_date_range(timeframe: Optional[Timeframe]):
         return today - timedelta(days=180)
     elif timeframe == Timeframe.YEAR_TO_DATE:
         return date(today.year, 1, 1)
-    return None
 
 async def get_portfolio(portfolio_id: int, session: AsyncSession):
     result = await session.execute(select(Portfolio).where(Portfolio.portfolio_id == portfolio_id))
@@ -115,12 +113,7 @@ class AllocationEventsResponse(BaseModel):
 
 @router.post("/portfolio/{id}/stop", response_model=TradeResponse)
 async def stop_trading(id: int, session: AsyncSession = Depends(get_session)):
-    result = await session.execute(
-        select(Portfolio).where(Portfolio.portfolio_id == id)
-    )
-    
-    portfolio = result.scalar_one_or_none()
-
+    portfolio = await get_portfolio(id, session)
     if portfolio is None:
         raise HTTPException(status_code=404, detail=f"Portfolio {id} not found")
 
@@ -136,12 +129,7 @@ async def stop_trading(id: int, session: AsyncSession = Depends(get_session)):
 
 @router.post("/portfolio/{id}/resume", response_model=TradeResponse)
 async def resume_trading(id: int, session: AsyncSession = Depends(get_session)):
-    result = await session.execute(
-        select(Portfolio).where(Portfolio.portfolio_id == id)
-    )
-    
-    portfolio = result.scalar_one_or_none()
-
+    portfolio = await get_portfolio(id, session)
     if portfolio is None:
         raise HTTPException(status_code=404, detail=f"Portfolio {id} not found")
 
@@ -157,17 +145,13 @@ async def resume_trading(id: int, session: AsyncSession = Depends(get_session)):
 
 @router.post("/portfolio/{id}/liquidate", response_model=TradeResponse)
 async def liquidate_all(id: int, session: AsyncSession = Depends(get_session)):
-    result = await session.execute(
-        select(Portfolio).where(Portfolio.portfolio_id == id)
-    )
-    
-    portfolio = result.scalar_one_or_none()
-
+    portfolio = await get_portfolio(id, session)
     if portfolio is None:
         raise HTTPException(status_code=404, detail=f"Portfolio {id} not found")
 
     # ASSUMPTION: same as for stop and resume_trading endpts.
     # liquidate(id)
+    await session.commit()
     
     return TradeResponse(
         success=True,
@@ -177,11 +161,24 @@ async def liquidate_all(id: int, session: AsyncSession = Depends(get_session)):
 
 
 @router.get("/portfolio/{id}/equity", response_model=EquityResponse)
-async def get_equity(id: int, timeframe: Optional[Timeframe] = None):
-    """get equity curve time series data"""
-    # TODO: Return equity time series data (back to a given timeframe) (db table to maintain equity value)
-    # Expected response: EquityResponse
-    return EquityResponse(data=[])
+async def get_equity(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
+    portfolio = await get_portfolio(id, session)
+    query = select(PerformanceSnapshot).where(PerformanceSnapshot.portfolio_id == id)
+
+    start_date = timeframe_to_date_range(timeframe)
+    query = query.where(PerformanceSnapshot.as_of >= start_date)
+    query = query.order_by(PerformanceSnapshot.as_of)
+
+    result = await session.execute(query)
+    snapshots = result.scalars().all()
+    equity_points = [
+        EquityPoint(
+            timestamp=snapshot.as_of.isoformat(),
+            equity_value=float(snapshot.equity)
+        ) for snapshot in snapshots
+    ]
+    
+    return EquityResponse(data=equity_points)
 
 @router.get("/portfolio/{id}/snapshot", response_model=SnapshotResponse)
 async def get_snapshot(id: int, timeframe: Optional[Timeframe] = None):
