@@ -52,11 +52,11 @@ class StrategyWeightsSnapshot(Base):
     
     portfolio_id = Column(BigInteger, nullable=False)
     as_of = Column(Date, nullable=False)
-    strategy_id = Column(BigInteger, nullable=False)
+    strategy_name = Column(String(255), nullable=False)
     weight = Column(Numeric(9, 6), nullable=False)
     
     __table_args__ = (
-        PrimaryKeyConstraint('portfolio_id', 'as_of', 'strategy_id'), # one snapshot per portfolio per strategy per day
+        PrimaryKeyConstraint('portfolio_id', 'as_of', 'strategy_name'), # one snapshot per portfolio per strategy per day
         CheckConstraint('weight >= 0 AND weight <= 1.0', name='weight_constraint')
     )
 
