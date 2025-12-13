@@ -35,6 +35,15 @@ def timeframe_to_date_range(timeframe: Optional[Timeframe]):
         return date(today.year, 1, 1)
     return None
 
+async def get_portfolio(portfolio_id: int, session: AsyncSession):
+    result = await session.execute(select(Portfolio).where(Portfolio.portfolio_id == portfolio_id))
+    portfolio = result.scalar_one_or_none()
+    
+    if portfolio is None:
+        raise HTTPException(status_code=404, detail=f"Portfolio {portfolio_id} not found")
+    
+    return portfolio
+
 class Timeframe(str, Enum):
     """current timeframe options for PM endpoints (subject to change, based on current frontend)"""
     THREE_MONTHS = "3M"
