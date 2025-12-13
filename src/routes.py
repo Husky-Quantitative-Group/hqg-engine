@@ -328,13 +328,23 @@ async def get_strategy_allocations(id: int, session: AsyncSession = Depends(get_
     return StrategyAllocationsResponse(allocations=allocations)
 
 @router.get("/portfolio/{id}/allocations/assets", response_model=AssetAllocationsResponse)
-async def get_asset_allocations(id: int):
-    """get allocations grouped by symbols"""
-    # TODO: Implement asset allocations retrieval for portfolio {id}
-        # Query current allocations (by symbol)
-        # Return mapping of symbols -> allocation (weight or value)
-    # Expected response: AssetAllocationsResponse with symbols -> allocation mapping
-    return AssetAllocationsResponse()
+async def get_asset_allocations(id: int, session: AsyncSession = Depends(get_session)):
+    """get asset allocations"""
+
+    await get_portfolio(id, session)
+    
+    query = select(AllocationEvent).where(AllocationEvent.portfolio_id == id)
+    query = query.order_by(AllocationEvent.timestamp.desc())
+    result = await session.execute(query)
+    allocation_event = result.scalar_one_or_none()
+    
+    if allocation_event is None:
+        return AssetAllocationsResponse(allocations={})
+    
+    allocations = allocation_event.allocations
+    allocations = {item["symbol"]: float(item["weight"]) for item in allocations}
+    
+    return AssetAllocationsResponse(allocations=allocations)
 
 @router.get("/portfolio/{id}/events/executions", response_model=ExecutionEventsResponse)
 async def get_execution_events(id: int, timeframe: Optional[Timeframe] = None):
