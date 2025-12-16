@@ -12,7 +12,7 @@ engine = create_async_engine(
 
 async_session = async_sessionmaker(
     engine,
-    class=AsyncSession,
+    class_=AsyncSession,
 )
 
 async def get_session():

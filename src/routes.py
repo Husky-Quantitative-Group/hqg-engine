@@ -21,6 +21,12 @@ from src.db.models import (
 
 router = APIRouter()
 
+class Timeframe(str, Enum):
+    """current timeframe options for PM endpoints (subject to change, based on current frontend)"""
+    THREE_MONTHS = "3M"
+    SIX_MONTHS = "6M"
+    YEAR_TO_DATE = "YTD"
+    
 def timeframe_to_date_range(timeframe: Optional[Timeframe]):
     if timeframe is None:
         return None # update to what we want our default to be
@@ -42,12 +48,6 @@ async def get_portfolio(portfolio_id: int, session: AsyncSession):
         raise HTTPException(status_code=404, detail=f"Portfolio {portfolio_id} not found")
     
     return portfolio
-
-class Timeframe(str, Enum):
-    """current timeframe options for PM endpoints (subject to change, based on current frontend)"""
-    THREE_MONTHS = "3M"
-    SIX_MONTHS = "6M"
-    YEAR_TO_DATE = "YTD"
 
 class TradeResponse(BaseModel):
     """Expected data model for trading endpoints"""
