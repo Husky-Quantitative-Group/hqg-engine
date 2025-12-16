@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, Dict, Any
 
-class MarketDataProvider(ABC):
+class MarketData(ABC):
     """Abstract the interface for streaming market data"""
     
     @abstractmethod
@@ -17,6 +16,17 @@ class MarketDataProvider(ABC):
         pass
     
     @abstractmethod
-    async def cleanup(self):
+    async def pause_stream(self):
         pass
 
+    @abstractmethod
+    async def resume_stream(self):
+        pass
+
+    @abstractmethod
+    async def clear_queue(self):
+        pass
+
+    @abstractmethod
+    async def cleanup(self):
+        pass

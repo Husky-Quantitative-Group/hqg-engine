@@ -1,0 +1,8 @@
+
+strategies:
+  - class_name: ClassicFinance_SPY_IEF
+    id: 1
+    portfolio_weight: 0.9
+  - class_name: SMA_AAPL
+    id: 2
+    portfolio_weight: 0.1

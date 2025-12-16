@@ -1,171 +1,178 @@
 import asyncio
 from pathlib import Path
-from typing import List, Dict
-from ib_async import IB
 import yaml
+import logging
 
-from hqg_algorithms import Slice, PortfolioView
+from src.portfolio import Portfolio
+from src.marketdata_provider.alpaca import AlpacaMarketData
+from src.execution_provider.alpaca import AlpacaExecutor
+from src.marketdata_provider.ibkr import IBKRMarketData
+from src.execution_provider.ibkr import IBKRExecutor
 
-from src.ingestor.ibkr import IBData
-from src.executor import Executor
-from src.aggregator import aggregate_allocations
-from src.strategies import SMAStrategy, BuyHoldStrategy
+
+logger = logging.getLogger(__name__)
+
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[logging.FileHandler("app.log", mode="a")]
+    )
 
 
-class Portfolio:
-    def __init__(self, config_path="config/strategies.yaml"):
-        self.strategies = []
-        self.strategy_configs = []
+class Engine():
+    def __init__(self, config_path="config/engine.yaml"):
         self.config_path = config_path
+        self.use_ib = True
+        self.ib_config = {}
+        self.alpaca_config = {}
         self.load_config()
-        self.init_strategies()
-        
 
     def load_config(self):
+        """Load configuration from YAML file"""
+        # TODO: fix fragile
+
+        # relative path first, then absolute from project root
         config_file = Path(self.config_path)
         
         if not config_file.exists():
-            raise FileNotFoundError(f"Config file not found: {self.config_path}")
+            config_file = Path(__file__).parent / self.config_path
+        
+        if not config_file.exists():
+            raise FileNotFoundError(f"Config file not found: {config_file}")
         
         with open(config_file, 'r') as f:
             config = yaml.safe_load(f)
-        
-        self.strategy_configs = config.get('strategies', [])
-        
-        if not self.strategy_configs:
-            raise ValueError("No strategies configured in the config file")
-    
 
-    def init_strategies(self):
-        strategy_classes = {
-            "SMAStrategy": SMAStrategy,
-            "BuyHoldStrategy": BuyHoldStrategy
-        }
+        self.use_ib = config.get('use_ib', True)
+        self.ib_config = config.get('ibkr_config', {})
+        self.alpaca_config = config.get('alpaca_config', {})
         
-        for config in self.strategy_configs:
-            strategy_id = config['id']
-            class_name = config['class_name']
-            tickers = config['tickers']
-            portfolio_weight = config['portfolio_weight']
-
-            if class_name not in strategy_classes:
-                raise ValueError(f"Unknown strategy class: {class_name}")
-            
-            StrategyClass = strategy_classes[class_name]
-            strategy_instance = StrategyClass(tickers=tickers)
-            universe = strategy_instance.universe()
-            
-            self.strategies.append({
-                'id': strategy_id,
-                'instance': strategy_instance,
-                'weight': portfolio_weight,
-                'tickers': universe
-            })
-            
-            print(f"Initialized strategy: {strategy_id} ({class_name}) with weight {portfolio_weight}")
+        logger.info(f"Config loaded from {config_file}. Using IB: {self.use_ib}")
     
-
-    def get_tickers(self):
-        all_tickers = set()
-        for strategy in self.strategies:
-            all_tickers.update(strategy['tickers'])
-        return list(all_tickers)
-    
-    
-    async def on_data(self, data):
-        strategy_results = []
-    
-        for strategy in self.strategies:
-            strategy_id = strategy['id']
-            strategy_instance = strategy['instance']
-            aum_weight = strategy['weight']
+    async def setup_ib(self):
+        """Setup IBKR connection"""
+        try:
+            from ib_async import IB
             
-            slice_obj = Slice(data)
-            portfolio_obj = PortfolioView(
-                equity=0.0,
-                cash=0.0,
-                positions={},
-                weights={}
+            ib = IB()
+            await ib.connectAsync(
+                host=self.ib_config['host'],
+                port=self.ib_config['port'],
+                clientId=self.ib_config['client_id']
             )
             
-            allocations_dict = strategy_instance.on_data(slice_obj, portfolio_obj)
+            if 'market_data_type' in self.ib_config:
+                ib.reqMarketDataType(self.ib_config['market_data_type'])
             
-            if allocations_dict is None:
-                continue
+            logger.info(f"Connected to IBKR at {self.ib_config['host']}:{self.ib_config['port']}")
             
-            allocations = list(allocations_dict.items())
-            strategy_results.append((strategy_id, allocations, aum_weight))
-            print(f"Strategy {strategy_id} allocations: {allocations}")
+            data_provider = IBKRMarketData(ib)
+            exec_provider = IBKRExecutor(ib)
+            return data_provider, exec_provider
+            
+        except Exception as e:
+            logger.error(f"Error connecting to IBKR: {e}")
+            raise
+
+    def setup_alpaca(self):
+        """Setup Alpaca connection"""
+        try:
+            logger.info("Setting up Alpaca connection")
+            
+            data_provider = AlpacaMarketData(
+                api_key=self.alpaca_config['api_key'],
+                secret_key=self.alpaca_config['secret_key'],
+                paper=True
+            )
+
+            exec_provider = AlpacaExecutor(
+                api_key=self.alpaca_config['api_key'],
+                secret_key=self.alpaca_config['secret_key'],
+                paper=True
+            )
+            
+            logger.info("Alpaca providers initialized")
+            return data_provider, exec_provider
+            
+        except Exception as e:
+            logger.error(f"Error setting up Alpaca: {e}")
+            raise
+
+    async def run(self):
+        """Main engine loop"""
+        data_provider = None
+        exec_provider = None
         
-        target_weights = aggregate_allocations(strategy_results)
-        print(f"Aggregated target weights: {target_weights}")
-        return target_weights
+        try:
+            portfolio = Portfolio(config_path="config/portfolio.yaml")
+            universe = portfolio.get_tickers()
+            
+            logger.info(f"Trading universe: {universe}")
+
+            # provider
+            if self.use_ib:
+                data_provider, exec_provider = await self.setup_ib()
+            else:
+                data_provider, exec_provider = self.setup_alpaca()
+            
+            logger.info("Starting trading engine")
+            market_data = {}
+            ticker_set = set(universe)
+
+            async for snapshot in data_provider.stream_prices(universe):
+                if snapshot is not None:
+                        market_data[snapshot['symbol']] = snapshot
+                
+                if set(market_data.keys()) >= ticker_set:
+                    await data_provider.pause_stream()
+
+                    # Get target weights from portfolio
+                    target_weights = await portfolio.on_data(market_data)
+
+                    # Get current account value
+                    portfolio_value = await exec_provider.get_account_value()
+                    logger.info(f"Current account value: ${portfolio_value:,.2f}")
+                    
+                    # Execute rebalancing
+                    logger.info(f"Rebalancing with target weights:{target_weights}")
+                    await exec_provider.rebalance(target_weights, portfolio_value, market_data)
+                    
+                    # Reset market data & wait 1 min before continuing
+                        # unless we want to use stream to calc ohlc... (currently only snapshot at 1 min intervals, not "1 min data")
+                    await asyncio.sleep(60)  
+                    market_data = {}
+                    
+                    # clear stale
+                    await data_provider.clear_queue()
+
+                    # resume provider
+                    await data_provider.resume_stream()
+                
+        except KeyboardInterrupt:
+            logger.info("Stopped from keyboard interrupt")
+            
+        except Exception as e:
+            logger.error(f"Error in trading engine: {e}", exc_info=True)
+            raise
+
+        finally:
+            # Cleanup connections
+            if data_provider:
+                await data_provider.cleanup()
+            logger.info("Engine shutdown complete")
 
 
-async def run_engine():
-    # load execution configuration
-    config_file = Path("config/execution.yaml")
-    with open(config_file, 'r') as f:
-        exec_config = yaml.safe_load(f)
-    
-    ibkr_config = exec_config['ibkr']
-    portfolio_config = exec_config['portfolio']
-    
-    # initialize portfolio
-    portfolio = Portfolio(config_path="config/strategies.yaml")
-    
-    # obtain all tickers
-    tickers = portfolio.get_tickers()
-    print(f"Trading universe: {tickers}")
-    
-    # connect to IBKR
-    ib = IB()
-    await ib.connectAsync(
-        host=ibkr_config['host'],
-        port=ibkr_config['port'],
-        clientId=ibkr_config['client_id']
-    )
-    
-    # set market data type
-    ib.reqMarketDataType(ibkr_config['market_data_type'])
-    print(f"Connected to IBKR at {ibkr_config['host']}:{ibkr_config['port']}")
-    
-    # init data provider and executor
-    data_provider = IBData(ib)
-    executor = Executor(ib)
+async def main():
+    setup_logging()
     
     try:
-        print("Starting trading engine")
-        market_data = {}
-        ticker_set = set(tickers)
-        async for snapshot in data_provider.stream_prices(tickers):
-            # obtain data for each ticker
-            market_data[snapshot['symbol']] = snapshot
-            
-            # process only when data for ALL tickers
-            if set(market_data.keys()) >= ticker_set:
-                print(f"\n Rebalancing with data for {list(market_data.keys())}")
-
-                target_weights = await portfolio.on_data(market_data)
-                portfolio_value = await executor.get_account_value()
-                print(f"Current account value: ${portfolio_value:,.2f}")
-                
-                await executor.rebalance(target_weights, portfolio_value)
-                market_data = {}
-            
-    except KeyboardInterrupt:
-        print("\n Stopped from keyboard interrupt")
-        
+        engine = Engine(config_path="config/engine.yaml")
+        await engine.run()
     except Exception as e:
-        print(f"Error in trading engine: {e}")
+        logger.error(f"Fatal error: {e}", exc_info=True)
         raise
-
-    finally:
-        await data_provider.cleanup()
-        ib.disconnect()
-        print("Disconnected from IBKR")
 
 
 if __name__ == "__main__":
-    asyncio.run(run_engine())
-
+    asyncio.run(main())

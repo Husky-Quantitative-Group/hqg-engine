@@ -1,0 +1,8 @@
+.venv/
+.pytest_cache/
+.vscode/
+
+__pycache__/
+
+engine.yaml
+app.log

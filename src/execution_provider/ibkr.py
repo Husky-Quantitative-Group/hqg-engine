@@ -1,9 +1,8 @@
 import asyncio
-from datetime import datetime
-from typing import Dict, List, Optional
-from ib_async import IB, Stock, MarketOrder, Order
+from ib_async import IB, Stock, MarketOrder
+from .base import Executor
 
-class Executor:
+class IBKRExecutor(Executor):
     def __init__(self, connection: IB):
         self.ib = connection
         self.order_history = [] # placeholder for order history

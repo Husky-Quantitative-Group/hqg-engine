@@ -1,9 +1,9 @@
 import asyncio
 from datetime import datetime
 from ib_async import IB, Stock
-from .base import MarketDataProvider
+from .base import MarketData
 
-class IBData(MarketDataProvider):
+class IBKRMarketData(MarketData):
     def __init__(self, connection: IB):
         self.ib = connection
         self._tickers = {}
@@ -59,7 +59,8 @@ class IBData(MarketDataProvider):
                     'high': ticker.high,
                     'low': ticker.low,
                     'close': ticker.close,
-                    'timestamp': datetime.now()
+                    'timestamp': datetime.now(),
+                    'source': 'ibkr'
                 }
     
 
@@ -68,3 +69,11 @@ class IBData(MarketDataProvider):
             self.ib.cancelMktData(ticker.contract)
         self._tickers.clear()
 
+
+    # TODO, if we want to keep the same structure in main
+    async def pause_stream(self):
+        pass
+    async def resume_stream(self):
+        pass
+    async def clear_queue(self):
+        pass
