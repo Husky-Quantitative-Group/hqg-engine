@@ -28,7 +28,9 @@ async def get_session():
 
 async def init_db():
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all())
+        def create_tables(sync_conn):
+            Base.metadata.create_all(bind=sync_conn)
+        await conn.run_sync(create_tables)
     print("Initialized database")
 
 async def close_db():

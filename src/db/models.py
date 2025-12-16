@@ -71,7 +71,7 @@ class ExecutionEvent(Base):
     symbol = Column(String(35), nullable=False)
     quantity = Column(Numeric(18, 6), nullable=False)
     
-    __table_args__ = (CheckConstraint('action IN ("buy", "sell")', name='action_constraint'),)
+    # __table_args__ = (CheckConstraint('action IN ("BUY", "SELL")', name='action_constraint'),)
 
 class AllocationEvent(Base):
     __tablename__ = "allocation_events"
