@@ -14,8 +14,8 @@ from src.db.models import (
     PerformanceSnapshot,
     HoldingsSnapshot,
     StrategyWeightsSnapshot,
-    ExecutionEvent,
-    AllocationEvent,
+    ExecutionEvent as ExecutionEventDB,
+    AllocationEvent as AllocationEventDB,
     Action
 )
 
@@ -333,8 +333,8 @@ async def get_asset_allocations(id: int, session: AsyncSession = Depends(get_ses
 
     await get_portfolio(id, session)
     
-    query = select(AllocationEvent).where(AllocationEvent.portfolio_id == id)
-    query = query.order_by(AllocationEvent.timestamp.desc())
+    query = select(AllocationEventDB).where(AllocationEventDB.portfolio_id == id)
+    query = query.order_by(AllocationEventDB.timestamp.desc())
     result = await session.execute(query)
     allocation_event = result.scalar_one_or_none()
     
@@ -352,11 +352,11 @@ async def get_execution_events(id: int, timeframe: Optional[Timeframe] = None, s
     # TODO: Return list of execution events (orders placed, trades executed)
     await get_portfolio(id, session)
 
-    query = select(ExecutionEvent).where(ExecutionEvent.portfolio_id == id)
+    query = select(ExecutionEventDB).where(ExecutionEventDB.portfolio_id == id)
     start_date = timeframe_to_date_range(timeframe)
-    query = query.where(ExecutionEvent.timestamp >= start_date)
+    query = query.where(ExecutionEventDB.timestamp >= start_date)
     
-    query = query.order_by(ExecutionEvent.timestamp.desc())
+    query = query.order_by(ExecutionEventDB.timestamp.desc())
     result = await session.execute(query)
     execution_events = result.scalars().all()
 
@@ -378,11 +378,11 @@ async def get_allocation_events(id: int, timeframe: Optional[Timeframe] = None, 
     """get list of rebalance events"""
     await get_portfolio(id, session)
 
-    query = select(AllocationEvent).where(AllocationEvent.portfolio_id == id)
+    query = select(AllocationEventDB).where(AllocationEventDB.portfolio_id == id)
     start_date = timeframe_to_date_range(timeframe)
-    query = query.where(AllocationEvent.timestamp >= start_date)
+    query = query.where(AllocationEventDB.timestamp >= start_date)
     
-    query = query.order_by(AllocationEvent.timestamp.desc())
+    query = query.order_by(AllocationEventDB.timestamp.desc())
     result = await session.execute(query)
     allocation_events = result.scalars().all()
 
