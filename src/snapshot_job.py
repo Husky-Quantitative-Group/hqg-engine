@@ -1,11 +1,16 @@
 import asyncio
 import logging
+from datetime import date
 from pathlib import Path
 from typing import Optional
 import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.database import async_session
+from src.db.models import Portfolio, Instrument, PerformanceSnapshot, HoldingsSnapshot
 from src.marketdata_provider.alpaca import AlpacaMarketData
 from src.execution_provider.alpaca import AlpacaExecutor
 
@@ -56,4 +61,87 @@ class SnapshotJob:
             
         except Exception as e:
             logger.error(f"Error setting up Alpaca: {e}")
+            raise
+    
+    async def get_active_portfolios(self):
+        async with async_session() as session:
+            result = await session.execute(select(Portfolio).where(Portfolio.is_active == True))
+            portfolios = result.scalars().all()
+            return list(portfolios)
+    
+    async def _get_or_create_instrument(self, session: AsyncSession, ticker: str):
+        result = await session.execute(select(Instrument).where(Instrument.ticker == ticker))
+        instrument = result.scalar_one_or_none()
+        
+        if instrument is None:
+            instrument = Instrument(ticker=ticker)
+            session.add(instrument)
+            await session.flush()
+            logger.info(f"Created new instrument: {ticker}")
+        
+        return instrument
+    
+    async def _get_price(self, symbol: str, alpaca_data: AlpacaMarketData):
+        try:
+            price_data = await alpaca_data.get_price(symbol)
+            if price_data and 'price' in price_data:
+                return float(price_data['price'])
+            else:
+                logger.warning(f"No price data returned for {symbol}")
+                return None
+        except Exception as e:
+            logger.error(f"Error fetching price for {symbol}: {e}")
+            return None
+    
+    async def portfolio_snapshot(self, portfolio_id, session: AsyncSession, alpaca_data: AlpacaMarketData, alpaca_exec: AlpacaExecutor):
+        """
+        Create portfolio snapshot records (PerformanceSnapshot and HoldingsSnapshot) for a single portfolio.
+        """
+        
+        snapshot_date = date.today()
+        
+        try:
+            equity = await alpaca_exec.get_account_value()
+            positions = await alpaca_exec.get_positions()
+            
+            performance_snapshot = PerformanceSnapshot(
+                portfolio_id=portfolio_id,
+                as_of=snapshot_date,
+                equity=equity
+            )
+            session.add(performance_snapshot)
+            
+            holdings_snapshots = []
+            for symbol, quantity in positions.items():
+                if quantity == 0:
+                    continue
+                
+                price = await self._get_price(symbol, alpaca_data)
+                if price is None:
+                    logger.warning(f"Skipping {symbol} - failed to fetch price")
+                    continue
+                
+                instrument = await self._get_or_create_instrument(session, symbol)
+                market_value = float(quantity) * price
+                
+                holdings_snapshot = HoldingsSnapshot(
+                    portfolio_id=portfolio_id,
+                    as_of=snapshot_date,
+                    instrument_id=instrument.instrument_id,
+                    quantity=quantity,
+                    price=price,
+                    market_value=market_value
+                )
+                holdings_snapshots.append(holdings_snapshot)
+            
+            for snapshot in holdings_snapshots:
+                session.add(snapshot)
+            
+            logger.info(
+                f"Portfolio {portfolio_id}: Created snapshot with {len(holdings_snapshots)} holdings"
+            )
+
+        except Exception as e:
+            logger.error(f"Portfolio {portfolio_id}: Error creating snapshot: {e}", exc_info=True)
+            await session.rollback()
             raise
