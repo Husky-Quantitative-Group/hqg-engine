@@ -34,3 +34,26 @@ class SnapshotJob:
         
         self.alpaca_config = config.get('alpaca_config', {})
         logger.info(f"Config loaded from {config_file}")
+    
+    def setup_alpaca(self):
+        try:
+            logger.info("Setting up Alpaca connection")
+            
+            self.alpaca_data = AlpacaMarketData(
+                api_key=self.alpaca_config['api_key'],
+                secret_key=self.alpaca_config['secret_key'],
+                paper=True
+            )
+
+            self.alpaca_exec = AlpacaExecutor(
+                api_key=self.alpaca_config['api_key'],
+                secret_key=self.alpaca_config['secret_key'],
+                paper=True
+            )
+            
+            logger.info("Alpaca providers initialized")
+            return self.alpaca_data, self.alpaca_exec
+            
+        except Exception as e:
+            logger.error(f"Error setting up Alpaca: {e}")
+            raise
