@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import async_session
-from src.db.models import Portfolio, Instrument, PerformanceSnapshot, HoldingsSnapshot
+from src.db.models import Portfolio, Instrument, PerformanceSnapshot, HoldingsSnapshot, StrategyWeightsSnapshot
 from src.marketdata_provider.alpaca import AlpacaMarketData
 from src.execution_provider.alpaca import AlpacaExecutor
 
@@ -144,4 +144,50 @@ class SnapshotJob:
         except Exception as e:
             logger.error(f"Portfolio {portfolio_id}: Error creating snapshot: {e}", exc_info=True)
             await session.rollback()
+            raise
+    
+    async def strategy_weights_snapshot(self, portfolio_id, as_of_date, session: AsyncSession):
+        # currently just using portfolio.yaml config. TODO: make this more flexible for the future.
+        try:
+            config_path = Path("src/config/portfolio.yaml")
+            if not config_path.exists():
+                config_path = Path(__file__).parent / "config" / "portfolio.yaml"
+            
+            if not config_path.exists():
+                raise FileNotFoundError(f"Portfolio config not found: {config_path}")
+            
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            
+            strategies = config.get('strategies', [])
+            if not strategies:
+                logger.warning(f"No strategies found in config for portfolio {portfolio_id}")
+                return
+            
+            for strategy_config in strategies:
+                strategy_id = strategy_config.get('id')
+                class_name = strategy_config.get('class_name')
+                portfolio_weight = strategy_config.get('portfolio_weight')
+                
+                if strategy_id is None or class_name is None or portfolio_weight is None:
+                    logger.warning(f"Invalid strategy config: {strategy_config}")
+                    continue
+                
+                strategy_snapshot = StrategyWeightsSnapshot(
+                    portfolio_id=portfolio_id,
+                    as_of=as_of_date,
+                    strategy_id=strategy_id,
+                    strategy_name=class_name,
+                    weight=portfolio_weight
+                )
+                session.add(strategy_snapshot)
+            
+            logger.info(
+                f"Portfolio {portfolio_id}: Created {len(strategies)} strategy weight snapshots"
+            )
+            
+        except Exception as e:
+            logger.error(
+                f"Portfolio {portfolio_id}: Error creating strategy weights snapshot: {e}",
+            )
             raise
