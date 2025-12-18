@@ -8,3 +8,4 @@ fastapi==0.109.2
 uvicorn==0.27.1
 pydantic==2.6.1
 alpaca-py>=0.43.2
+pytz==2025.2
