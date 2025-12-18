@@ -6,6 +6,7 @@ from typing import Optional
 import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+import pytz
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -191,3 +192,110 @@ class SnapshotJob:
                 f"Portfolio {portfolio_id}: Error creating strategy weights snapshot: {e}",
             )
             raise
+    
+    async def run(self):
+        logger.info("Starting snapshot job")
+
+        self.setup_alpaca()
+        snapshot_date = date.today()
+        
+        try:
+            portfolios = await self.get_active_portfolios()
+            
+            if not portfolios:
+                logger.info("No active portfolios found")
+                return
+            
+            logger.info(f"Found {len(portfolios)} active portfolio(s)")
+            
+            for portfolio in portfolios:
+                try:
+                    logger.info(f"Processing portfolio {portfolio.portfolio_id}: {portfolio.name}")
+                    
+                    async with async_session() as portfolio_session:
+                        await self.portfolio_snapshot(
+                            portfolio.portfolio_id,
+                            portfolio_session,
+                            self.alpaca_data,
+                            self.alpaca_exec
+                        )
+                        await portfolio_session.commit()
+                    
+                    async with async_session() as weights_session:
+                        await self.strategy_weights_snapshot(
+                            portfolio.portfolio_id,
+                            snapshot_date,
+                            weights_session
+                        )
+                        await weights_session.commit()
+                    
+                    logger.info(f"Successfully created snapshots for portfolio {portfolio.portfolio_id}")
+
+                except Exception as e:
+                    logger.error(
+                        f"Failed to create snapshot for portfolio {portfolio.portfolio_id}: {e}",
+                        exc_info=True
+                    )
+                    continue
+            
+            logger.info("Snapshot job completed")
+        
+        except Exception as e:
+            logger.error(f"Error in snapshot job: {e}")
+            raise
+
+        finally:
+            if self.alpaca_data:
+                await self.alpaca_data.cleanup()
+    
+    def schedule(self):
+        if self.scheduler is not None:
+            logger.warning("Scheduler already initialized")
+            return
+        
+        self.scheduler = AsyncIOScheduler()
+        
+        # setup timezone for EDT
+        est_tz = pytz.timezone('US/Eastern')
+
+        self.scheduler.add_job(
+            self.run,
+            trigger=CronTrigger(hour=16, minute=0, timezone=est_tz),
+            id='daily_snapshot_job',
+            name='Daily Portfolio Snapshot',
+            replace_existing=True
+        )
+        
+        self.scheduler.start()
+        logger.info("Snapshot job scheduled for daily execution at 4 PM EST")
+    
+    def shutdown(self):
+        if self.scheduler:
+            self.scheduler.shutdown()
+            logger.info("Scheduler shut down")
+
+
+async def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    
+    job = SnapshotJob()
+    
+    try:
+        job.schedule()
+        
+        logger.info("Snapshot job scheduler started.")
+        while True:
+            await asyncio.sleep(1)
+    
+    except KeyboardInterrupt:
+        logger.info("Received shutdown signal")
+    finally:
+        job.shutdown()
+        logger.info("Snapshot job stopped")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
