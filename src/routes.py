@@ -115,11 +115,7 @@ class AllocationEventsResponse(BaseModel):
 @router.post("/portfolio/{id}/stop", response_model=TradeResponse)
 async def stop_trading(id: int, session: AsyncSession = Depends(get_session)):
     portfolio = await get_portfolio(id, session)
-    if portfolio is None:
-        raise HTTPException(status_code=404, detail=f"Portfolio {id} not found")
-
-    # ASSUMPTION: some "stop_trading(portfolio_id)" will be defined in src/portfolio.py (add import here after)
-    # stop_trading(id)
+    
     portfolio.is_active = False
     await session.commit()
     
@@ -131,11 +127,7 @@ async def stop_trading(id: int, session: AsyncSession = Depends(get_session)):
 @router.post("/portfolio/{id}/resume", response_model=TradeResponse)
 async def resume_trading(id: int, session: AsyncSession = Depends(get_session)):
     portfolio = await get_portfolio(id, session)
-    if portfolio is None:
-        raise HTTPException(status_code=404, detail=f"Portfolio {id} not found")
-
-    # ASSUMPTION: same as for stop_trading endpt.
-    # resume_trading(id)
+    
     portfolio.is_active = True
     await session.commit()
     

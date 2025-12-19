@@ -8,6 +8,9 @@ from src.marketdata_provider.alpaca import AlpacaMarketData
 from src.execution_provider.alpaca import AlpacaExecutor
 from src.marketdata_provider.ibkr import IBKRMarketData
 from src.execution_provider.ibkr import IBKRExecutor
+from src.database import async_session
+from src.db.models import Portfolio as PortfolioDB
+from sqlalchemy import select
 
 
 logger = logging.getLogger(__name__)
@@ -127,16 +130,27 @@ class Engine():
                 if set(market_data.keys()) >= ticker_set:
                     await data_provider.pause_stream()
 
-                    # Get target weights from portfolio
-                    target_weights = await portfolio.on_data(market_data)
+                    async with async_session() as session:
+                        result = await session.execute(select(PortfolioDB).where(PortfolioDB.portfolio_id == 1)) # TODO: generalize to work with multiple portfolios
+                        db_portfolio = result.scalar_one_or_none()
+                        
+                        if db_portfolio is None:
+                            logger.warning("No portfolio found in database, skipping trading cycle")
+                            continue
+                        elif not db_portfolio.is_active:
+                            logger.info("Portfolio is inactive, skipping trading cycle")
+                            continue
+                        else:
+                            # Get target weights from portfolio
+                            target_weights = await portfolio.on_data(market_data)
 
-                    # Get current account value
-                    portfolio_value = await exec_provider.get_account_value()
-                    logger.info(f"Current account value: ${portfolio_value:,.2f}")
-                    
-                    # Execute rebalancing
-                    logger.info(f"Rebalancing with target weights:{target_weights}")
-                    await exec_provider.rebalance(target_weights, portfolio_value, market_data)
+                            # Get current account value
+                            portfolio_value = await exec_provider.get_account_value()
+                            logger.info(f"Current account value: ${portfolio_value:,.2f}")
+                            
+                            # Execute rebalancing
+                            logger.info(f"Rebalancing with target weights:{target_weights}")
+                            await exec_provider.rebalance(target_weights, portfolio_value, market_data)
                     
                     # Reset market data & wait 1 min before continuing
                         # unless we want to use stream to calc ohlc... (currently only snapshot at 1 min intervals, not "1 min data")
