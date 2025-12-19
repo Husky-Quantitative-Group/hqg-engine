@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_session
+from src.executor_provider.alpaca import AlpacaExecutor
 
 from src.db.models import (
     Portfolio,
@@ -142,14 +143,40 @@ async def liquidate_all(id: int, session: AsyncSession = Depends(get_session)):
     if portfolio is None:
         raise HTTPException(status_code=404, detail=f"Portfolio {id} not found")
 
-    # ASSUMPTION: same as for stop and resume_trading endpts.
-    # liquidate(id)
-    await session.commit()
-    
-    return TradeResponse(
-        success=True,
-        message="Liquidation initiated successfully"
-    )
+    try:
+        config_path = Path("config/engine.yaml")
+        if not config_path.exists():
+            config_path = Path(__file__).parent.parent / "config/engine.yaml"
+        
+        if not config_path.exists():
+            raise HTTPException(status_code=500, detail="Engine config file not found")
+        
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        
+        alpaca_config = config.get('alpaca_config', {})
+        
+        exec_provider = AlpacaExecutor(
+            api_key=alpaca_config['api_key'],
+            secret_key=alpaca_config['secret_key'],
+            paper=True
+        )
+        
+        logger.info(f"Liquidating portfolio {id}")
+        await exec_provider.liquidate_all()
+        
+        portfolio.is_active = False
+        await session.commit()
+        
+        return TradeResponse(
+            success=True,
+            message=f"Liquidation completed. All positions sold and trading stopped."
+        )
+
+    except Exception as e:
+        await session.rollback()
+        logger.error(f"Error during liquidation for portfolio {id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error during liquidation: {str(e)}")
 
 
 
