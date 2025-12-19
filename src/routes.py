@@ -161,7 +161,7 @@ async def liquidate_all(id: int, session: AsyncSession = Depends(get_session)):
         )
         
         logger.info(f"Liquidating portfolio {id}")
-        await exec_provider.liquidate_all()
+        await exec_provider.liquidate()
         
         portfolio.is_active = False
         await session.commit()
