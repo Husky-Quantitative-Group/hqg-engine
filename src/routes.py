@@ -140,8 +140,6 @@ async def resume_trading(id: int, session: AsyncSession = Depends(get_session)):
 @router.post("/portfolio/{id}/liquidate", response_model=TradeResponse)
 async def liquidate_all(id: int, session: AsyncSession = Depends(get_session)):
     portfolio = await get_portfolio(id, session)
-    if portfolio is None:
-        raise HTTPException(status_code=404, detail=f"Portfolio {id} not found")
 
     try:
         config_path = Path("config/engine.yaml")
