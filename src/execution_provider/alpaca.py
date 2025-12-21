@@ -183,13 +183,12 @@ class AlpacaExecutor(Executor):
             logger.info(f"Liquidating {len(positions)} positions: {positions}")
             
             for symbol, quantity in positions.items():
-                abs_quantity = abs(quantity)
-                if abs_quantity > 0:
-                    logger.info(f"Liquidating {abs_quantity} shares of {symbol} (current: {quantity})")
-                    await self.place_order(symbol, int(abs_quantity), "SELL")
-                    await asyncio.sleep(0.1) # small delay between
+                side = "SELL" if quantity > 0 else "BUY"
+                logger.info(f"Liquidating {abs(quantity)} shares of {symbol} (side: {side})")
+                await self.place_order(symbol, int(abs(quantity)), side)
+                await asyncio.sleep(0.1) # small delay between
             
-            logger.info("Liquidation complete, all positions sold")
+            logger.info("Liquidation complete, all positions closed")
             
         except Exception as e:
             logger.error(f"Error during liquidation: {e}")
