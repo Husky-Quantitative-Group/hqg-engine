@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_session
-from src.executor_provider.alpaca import AlpacaExecutor
+from src.main import Engine
 
 from src.db.models import (
     Portfolio,
@@ -142,26 +142,9 @@ async def liquidate_all(id: int, session: AsyncSession = Depends(get_session)):
     portfolio = await get_portfolio(id, session)
 
     try:
-        config_path = Path("config/engine.yaml")
-        if not config_path.exists():
-            config_path = Path(__file__).parent.parent / "config/engine.yaml"
-        
-        if not config_path.exists():
-            raise HTTPException(status_code=500, detail="Engine config file not found")
-        
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-        
-        alpaca_config = config.get('alpaca_config', {})
-        
-        exec_provider = AlpacaExecutor(
-            api_key=alpaca_config['api_key'],
-            secret_key=alpaca_config['secret_key'],
-            paper=True
-        )
-        
+        executor = Engine().get_exec_provider()
         logger.info(f"Liquidating portfolio {id}")
-        await exec_provider.liquidate()
+        await executor.liquidate_portfolio()
         
         portfolio.is_active = False
         await session.commit()
@@ -175,8 +158,6 @@ async def liquidate_all(id: int, session: AsyncSession = Depends(get_session)):
         await session.rollback()
         logger.error(f"Error during liquidation for portfolio {id}: {e}")
         raise HTTPException(status_code=500, detail=f"Error during liquidation: {str(e)}")
-
-
 
 @router.get("/portfolio/{id}/equity", response_model=EquityResponse)
 async def get_equity(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):

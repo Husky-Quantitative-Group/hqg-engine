@@ -108,6 +108,9 @@ class Engine():
     def get_exec_provider(self):
         return self.exec_provider
 
+    async def liquidate_portfolio(self):
+        await self.get_exec_provider().liquidate_portfolio()
+
     async def run(self):
         """Main engine loop"""
         data_provider = None
