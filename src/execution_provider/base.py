@@ -30,5 +30,5 @@ class Executor(ABC):
         pass
 
     @abstractmethod
-    async def liquidate(self):
+    async def liquidate_portfolio(self):
         pass

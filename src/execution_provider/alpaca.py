@@ -172,7 +172,7 @@ class AlpacaExecutor(Executor):
             logger.error(f"Error during rebalancing: {e}")
             raise
     
-    async def liquidate(self) -> None:
+    async def liquidate_portfolio(self) -> None:
         try:
             positions = await self.get_positions()
             
