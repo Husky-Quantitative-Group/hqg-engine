@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_session
+from src.main import Engine
 
 from src.db.models import (
     Portfolio,
@@ -115,11 +116,7 @@ class AllocationEventsResponse(BaseModel):
 @router.post("/portfolio/{id}/stop", response_model=TradeResponse)
 async def stop_trading(id: int, session: AsyncSession = Depends(get_session)):
     portfolio = await get_portfolio(id, session)
-    if portfolio is None:
-        raise HTTPException(status_code=404, detail=f"Portfolio {id} not found")
-
-    # ASSUMPTION: some "stop_trading(portfolio_id)" will be defined in src/portfolio.py (add import here after)
-    # stop_trading(id)
+    
     portfolio.is_active = False
     await session.commit()
     
@@ -131,11 +128,7 @@ async def stop_trading(id: int, session: AsyncSession = Depends(get_session)):
 @router.post("/portfolio/{id}/resume", response_model=TradeResponse)
 async def resume_trading(id: int, session: AsyncSession = Depends(get_session)):
     portfolio = await get_portfolio(id, session)
-    if portfolio is None:
-        raise HTTPException(status_code=404, detail=f"Portfolio {id} not found")
-
-    # ASSUMPTION: same as for stop_trading endpt.
-    # resume_trading(id)
+    
     portfolio.is_active = True
     await session.commit()
     
@@ -147,19 +140,24 @@ async def resume_trading(id: int, session: AsyncSession = Depends(get_session)):
 @router.post("/portfolio/{id}/liquidate", response_model=TradeResponse)
 async def liquidate_all(id: int, session: AsyncSession = Depends(get_session)):
     portfolio = await get_portfolio(id, session)
-    if portfolio is None:
-        raise HTTPException(status_code=404, detail=f"Portfolio {id} not found")
 
-    # ASSUMPTION: same as for stop and resume_trading endpts.
-    # liquidate(id)
-    await session.commit()
-    
-    return TradeResponse(
-        success=True,
-        message="Liquidation initiated successfully"
-    )
+    try:
+        executor = Engine().get_exec_provider()
+        logger.info(f"Liquidating portfolio {id}")
+        await executor.liquidate_portfolio()
+        
+        portfolio.is_active = False
+        await session.commit()
+        
+        return TradeResponse(
+            success=True,
+            message=f"Liquidation completed. All positions sold and trading stopped."
+        )
 
-
+    except Exception as e:
+        await session.rollback()
+        logger.error(f"Error during liquidation for portfolio {id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error during liquidation: {str(e)}")
 
 @router.get("/portfolio/{id}/equity", response_model=EquityResponse)
 async def get_equity(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):

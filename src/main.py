@@ -8,6 +8,9 @@ from src.marketdata_provider.alpaca import AlpacaMarketData
 from src.execution_provider.alpaca import AlpacaExecutor
 from src.marketdata_provider.ibkr import IBKRMarketData
 from src.execution_provider.ibkr import IBKRExecutor
+from src.database import async_session
+from src.db.models import Portfolio as PortfolioDB
+from sqlalchemy import select
 
 
 logger = logging.getLogger(__name__)
@@ -26,6 +29,8 @@ class Engine():
         self.use_ib = True
         self.ib_config = {}
         self.alpaca_config = {}
+        self.exec_provider = None
+        self.data_provider = None
         self.load_config()
 
     def load_config(self):
@@ -67,9 +72,8 @@ class Engine():
             
             logger.info(f"Connected to IBKR at {self.ib_config['host']}:{self.ib_config['port']}")
             
-            data_provider = IBKRMarketData(ib)
-            exec_provider = IBKRExecutor(ib)
-            return data_provider, exec_provider
+            self.data_provider = IBKRMarketData(ib)
+            self.exec_provider = IBKRExecutor(ib)
             
         except Exception as e:
             logger.error(f"Error connecting to IBKR: {e}")
@@ -80,24 +84,29 @@ class Engine():
         try:
             logger.info("Setting up Alpaca connection")
             
-            data_provider = AlpacaMarketData(
+            self.data_provider = AlpacaMarketData(
                 api_key=self.alpaca_config['api_key'],
                 secret_key=self.alpaca_config['secret_key'],
                 paper=True
             )
 
-            exec_provider = AlpacaExecutor(
+            self.exec_provider = AlpacaExecutor(
                 api_key=self.alpaca_config['api_key'],
                 secret_key=self.alpaca_config['secret_key'],
                 paper=True
             )
             
             logger.info("Alpaca providers initialized")
-            return data_provider, exec_provider
             
         except Exception as e:
             logger.error(f"Error setting up Alpaca: {e}")
             raise
+    
+    def get_data_provider(self):
+        return self.data_provider
+    
+    def get_exec_provider(self):
+        return self.exec_provider
 
     async def run(self):
         """Main engine loop"""
@@ -112,31 +121,42 @@ class Engine():
 
             # provider
             if self.use_ib:
-                data_provider, exec_provider = await self.setup_ib()
+                await self.setup_ib()
             else:
-                data_provider, exec_provider = self.setup_alpaca()
+                self.setup_alpaca()
             
             logger.info("Starting trading engine")
             market_data = {}
             ticker_set = set(universe)
 
-            async for snapshot in data_provider.stream_prices(universe):
+            async for snapshot in self.data_provider.stream_prices(universe):
                 if snapshot is not None:
                         market_data[snapshot['symbol']] = snapshot
                 
                 if set(market_data.keys()) >= ticker_set:
-                    await data_provider.pause_stream()
+                    await self.data_provider.pause_stream()
 
-                    # Get target weights from portfolio
-                    target_weights = await portfolio.on_data(market_data)
+                    async with async_session() as session:
+                        result = await session.execute(select(PortfolioDB).where(PortfolioDB.portfolio_id == 1)) # TODO: generalize to work with multiple portfolios
+                        db_portfolio = result.scalar_one_or_none()
+                        
+                        if db_portfolio is None:
+                            logger.warning("No portfolio found in database, skipping trading cycle")
+                            continue
+                        elif not db_portfolio.is_active:
+                            logger.info("Portfolio is inactive, skipping trading cycle")
+                            continue
+                        else:
+                            # Get target weights from portfolio
+                            target_weights = await portfolio.on_data(market_data)
 
-                    # Get current account value
-                    portfolio_value = await exec_provider.get_account_value()
-                    logger.info(f"Current account value: ${portfolio_value:,.2f}")
-                    
-                    # Execute rebalancing
-                    logger.info(f"Rebalancing with target weights:{target_weights}")
-                    await exec_provider.rebalance(target_weights, portfolio_value, market_data)
+                            # Get current account value
+                            portfolio_value = await self.exec_provider.get_account_value()
+                            logger.info(f"Current account value: ${portfolio_value:,.2f}")
+                            
+                            # Execute rebalancing
+                            logger.info(f"Rebalancing with target weights:{target_weights}")
+                            await self.exec_provider.rebalance(target_weights, portfolio_value, market_data)
                     
                     # Reset market data & wait 1 min before continuing
                         # unless we want to use stream to calc ohlc... (currently only snapshot at 1 min intervals, not "1 min data")
@@ -144,10 +164,10 @@ class Engine():
                     market_data = {}
                     
                     # clear stale
-                    await data_provider.clear_queue()
+                    await self.data_provider.clear_queue()
 
                     # resume provider
-                    await data_provider.resume_stream()
+                    await self.data_provider.resume_stream()
                 
         except KeyboardInterrupt:
             logger.info("Stopped from keyboard interrupt")
@@ -158,8 +178,8 @@ class Engine():
 
         finally:
             # Cleanup connections
-            if data_provider:
-                await data_provider.cleanup()
+            if self.data_provider:
+                await self.data_provider.cleanup()
             logger.info("Engine shutdown complete")
 
 

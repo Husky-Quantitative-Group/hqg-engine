@@ -171,3 +171,25 @@ class AlpacaExecutor(Executor):
         except Exception as e:
             logger.error(f"Error during rebalancing: {e}")
             raise
+    
+    async def liquidate_portfolio(self) -> None:
+        try:
+            positions = await self.get_positions()
+            
+            if not positions:
+                logger.info("No positions to liquidate")
+                return
+            
+            logger.info(f"Liquidating {len(positions)} positions: {positions}")
+            
+            for symbol, quantity in positions.items():
+                side = "SELL" if quantity > 0 else "BUY"
+                logger.info(f"Liquidating {abs(quantity)} shares of {symbol} (side: {side})")
+                await self.place_order(symbol, int(abs(quantity)), side)
+                await asyncio.sleep(0.1) # small delay between
+            
+            logger.info("Liquidation complete, all positions closed")
+            
+        except Exception as e:
+            logger.error(f"Error during liquidation: {e}")
+            raise
