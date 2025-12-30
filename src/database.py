@@ -3,6 +3,8 @@ from typing import AsyncGenerator
 from sqlalchemy.pool import NullPool
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from src.db import Base
+from sqlalchemy import text
+import asyncio
 
 engine = create_async_engine(
     os.getenv("DATABASE_URL"),
@@ -36,3 +38,40 @@ async def init_db():
 async def close_db():
     await engine.dispose()
     print("Closed database connection")
+
+async def wait_for_postgres():
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        logger.error("DATABASE_URL environment variable not set")
+        raise ValueError
+    
+    check_engine = create_async_engine(db_url)
+    max_retries = 60
+    retry = 0
+    
+    while retry < max_retries:
+        try:
+            async with check_engine.begin() as conn:
+                await conn.execute(text("SELECT 1"))
+            logger.info("PostgreSQL is ready")
+            await check_engine.dispose()
+            return
+        except Exception as e:
+            retry += 1
+            if retry >= max_retries:
+                await check_engine.dispose()
+                raise ConnectionError(f"Failed to connect to PostgreSQL after {max_retries} retries: {e}")
+            await asyncio.sleep(1)
+    
+    await check_engine.dispose()
+
+async def main():
+    print("Waiting for PostgreSQL to be ready")
+    await wait_for_postgres()
+    
+    print("Initializing database")
+    await init_db()
+    print("Database initialized successfully")
+
+if __name__ == "__main__":
+    asyncio.run(main())

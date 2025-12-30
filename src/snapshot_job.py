@@ -12,57 +12,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import async_session
 from src.db.models import Portfolio, Instrument, PerformanceSnapshot, HoldingsSnapshot, StrategyWeightsSnapshot
-from src.marketdata_provider.alpaca import AlpacaMarketData
-from src.execution_provider.alpaca import AlpacaExecutor
+from src.main import Engine
 
 logger = logging.getLogger(__name__)
 
 class SnapshotJob:
-    def __init__(self, config_path="config/engine.yaml"):
-        self.config_path = config_path
-        self.alpaca_config = {}
+    def __init__(self):
         self.scheduler: Optional[AsyncIOScheduler] = None
-        self.alpaca_data: Optional[AlpacaMarketData] = None
-        self.alpaca_exec: Optional[AlpacaExecutor] = None
-        self.load_config()
-    
-    def load_config(self):
-        config_file = Path(self.config_path)
-        
-        if not config_file.exists():
-            config_file = Path(__file__).parent.parent / self.config_path
-        
-        if not config_file.exists():
-            raise FileNotFoundError(f"Config file not found: {config_file}")
-        
-        with open(config_file, 'r') as f:
-            config = yaml.safe_load(f)
-        
-        self.alpaca_config = config.get('alpaca_config', {})
-        logger.info(f"Config loaded from {config_file}")
-    
-    def setup_alpaca(self):
-        try:
-            logger.info("Setting up Alpaca connection")
-            
-            self.alpaca_data = AlpacaMarketData(
-                api_key=self.alpaca_config['api_key'],
-                secret_key=self.alpaca_config['secret_key'],
-                paper=True
-            )
-
-            self.alpaca_exec = AlpacaExecutor(
-                api_key=self.alpaca_config['api_key'],
-                secret_key=self.alpaca_config['secret_key'],
-                paper=True
-            )
-            
-            logger.info("Alpaca providers initialized")
-            return self.alpaca_data, self.alpaca_exec
-            
-        except Exception as e:
-            logger.error(f"Error setting up Alpaca: {e}")
-            raise
+        self.executor_provider = Engine().get_exec_provider() # assumed from stop/resume/liquidate functionality PR (#15)
+        self.data_provider = Engine().get_data_provider() # assumed from stop/resume/liquidate functionality PR (#15)
     
     async def get_active_portfolios(self):
         async with async_session() as session:
@@ -82,9 +40,9 @@ class SnapshotJob:
         
         return instrument
     
-    async def _get_price(self, symbol: str, alpaca_data: AlpacaMarketData):
+    async def _get_price(self, symbol: str):
         try:
-            price_data = await alpaca_data.get_price(symbol)
+            price_data = await self.data_provider.get_price(symbol)
             if price_data and 'price' in price_data:
                 return float(price_data['price'])
             else:
@@ -94,7 +52,7 @@ class SnapshotJob:
             logger.error(f"Error fetching price for {symbol}: {e}")
             return None
     
-    async def portfolio_snapshot(self, portfolio_id, session: AsyncSession, alpaca_data: AlpacaMarketData, alpaca_exec: AlpacaExecutor):
+    async def portfolio_snapshot(self, portfolio_id, session: AsyncSession):
         """
         Create portfolio snapshot records (PerformanceSnapshot and HoldingsSnapshot) for a single portfolio.
         """
@@ -102,8 +60,8 @@ class SnapshotJob:
         snapshot_date = date.today()
         
         try:
-            equity = await alpaca_exec.get_account_value()
-            positions = await alpaca_exec.get_positions()
+            equity = await self.executor_provider.get_account_value()
+            positions = await self.executor_provider.get_positions()
             
             performance_snapshot = PerformanceSnapshot(
                 portfolio_id=portfolio_id,
