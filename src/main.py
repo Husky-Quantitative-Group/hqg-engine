@@ -1,6 +1,5 @@
 import asyncio
-from pathlib import Path
-import yaml
+import os
 import logging
 
 from src.portfolio import Portfolio
@@ -24,9 +23,8 @@ def setup_logging():
 
 
 class Engine():
-    def __init__(self, config_path="config/engine.yaml"):
-        self.config_path = config_path
-        self.use_ib = True
+    def __init__(self):
+        self.use_ib = None
         self.ib_config = {}
         self.alpaca_config = {}
         self.exec_provider = None
@@ -34,26 +32,32 @@ class Engine():
         self.load_config()
 
     def load_config(self):
-        """Load configuration from YAML file"""
-        # TODO: fix fragile
+        """Load configuration from env"""
 
-        # relative path first, then absolute from project root
-        config_file = Path(self.config_path)
-        
-        if not config_file.exists():
-            config_file = Path(__file__).parent / self.config_path
-        
-        if not config_file.exists():
-            raise FileNotFoundError(f"Config file not found: {config_file}")
-        
-        with open(config_file, 'r') as f:
-            config = yaml.safe_load(f)
+        if os.environ.get("PROVIDER") == "ib":
+            self.use_ib = True
 
-        self.use_ib = config.get('use_ib', True)
-        self.ib_config = config.get('ibkr_config', {})
-        self.alpaca_config = config.get('alpaca_config', {})
+        elif os.environ.get("PROVIDER") == "alpaca":
+            self.use_ib = False
+
+        else:
+            raise ValueError("Invalid provider")
         
-        logger.info(f"Config loaded from {config_file}. Using IB: {self.use_ib}")
+        if self.use_ib:
+            self.ib_config = {
+                'host': os.environ["IBKR_HOST"],
+                'port': int(os.environ["IBKR_PORT"]),
+                'client_id': int(os.environ["IBKR_CLIENT_ID"])
+            }
+            logger.info(f"Using IBKR. Config: {self.ib_config}")
+       
+       else:
+            self.alpaca_config = {
+                'api_key': os.environ["ALPACA_API_KEY"],
+                'secret_key': os.environ["ALPACA_SECRET_KEY"],
+                'paper': os.environ.get("ALPACA_PAPER", "true")
+            }
+            logger.info(f"Using Alpaca. Config: {self.alpaca_config}")
     
     async def setup_ib(self):
         """Setup IBKR connection"""
@@ -97,7 +101,7 @@ class Engine():
             )
             
             logger.info("Alpaca providers initialized")
-            
+
         except Exception as e:
             logger.error(f"Error setting up Alpaca: {e}")
             raise
@@ -187,7 +191,7 @@ async def main():
     setup_logging()
     
     try:
-        engine = Engine(config_path="config/engine.yaml")
+        engine = Engine()
         await engine.run()
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
