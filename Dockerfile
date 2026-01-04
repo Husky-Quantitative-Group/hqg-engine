@@ -1,5 +1,8 @@
 FROM python:3.11-slim
 
+ENV http_proxy=http://user-proxy.business.uconn.edu:3128
+ENV https_proxy=http://user-proxy.business.uconn.edu:3128
+
 RUN apt-get update && apt-get install -y \
     postgresql-client \
     libpq-dev \
