@@ -51,7 +51,7 @@ class Engine():
             }
             logger.info(f"Using IBKR. Config: {self.ib_config}")
        
-       else:
+        else:
             self.alpaca_config = {
                 'api_key': os.environ["ALPACA_API_KEY"],
                 'secret_key': os.environ["ALPACA_SECRET_KEY"],
