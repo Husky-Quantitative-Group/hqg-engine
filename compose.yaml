@@ -11,7 +11,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -64,6 +64,12 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      # PROVIDER: ${PROVIDER}
+      HTTP_PROXY: ${HTTP_PROXY}
+      HTTPS_PROXY: ${HTTPS_PROXY}
+      ALPACA_API_KEY: ${ALPACA_API_KEY}
+      ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
+      ALPACA_PAPER: ${ALPACA_PAPER}
     volumes:
       - ./src/config:/app/src/config:ro
     command: python3 -m src.snapshot_job
@@ -81,6 +87,12 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      PROVIDER: ${PROVIDER}
+      HTTP_PROXY: ${HTTP_PROXY}
+      HTTPS_PROXY: ${HTTPS_PROXY}
+      ALPACA_API_KEY: ${ALPACA_API_KEY}
+      ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
+      ALPACA_PAPER: ${ALPACA_PAPER}
     volumes:
       - ./src/config:/app/src/config:ro
     command: python3 -m src.main
