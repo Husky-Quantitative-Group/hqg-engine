@@ -5,6 +5,9 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from src.db import Base
 from sqlalchemy import text
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 engine = create_async_engine(
     os.getenv("DATABASE_URL"),
