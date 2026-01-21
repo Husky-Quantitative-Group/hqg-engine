@@ -12,15 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import async_session
 from src.db.models import Portfolio, Instrument, PerformanceSnapshot, HoldingsSnapshot, StrategyWeightsSnapshot
-from src.main import Engine
+from src.provider_instance.client import provider_client
 
 logger = logging.getLogger(__name__)
 
 class SnapshotJob:
     def __init__(self):
         self.scheduler: Optional[AsyncIOScheduler] = None
-        self.executor_provider = Engine().get_exec_provider() # assumed from stop/resume/liquidate functionality PR (#15)
-        self.data_provider = Engine().get_data_provider() # assumed from stop/resume/liquidate functionality PR (#15)
     
     async def get_active_portfolios(self):
         async with async_session() as session:
@@ -42,12 +40,8 @@ class SnapshotJob:
     
     async def _get_price(self, symbol: str):
         try:
-            price_data = await self.data_provider.get_price(symbol)
-            if price_data and 'price' in price_data:
-                return float(price_data['price'])
-            else:
-                logger.warning(f"No price data returned for {symbol}")
-                return None
+            price = await provider_client.get_price(symbol)
+            return price
         except Exception as e:
             logger.error(f"Error fetching price for {symbol}: {e}")
             return None
@@ -60,8 +54,8 @@ class SnapshotJob:
         snapshot_date = date.today()
         
         try:
-            equity = await self.executor_provider.get_account_value()
-            positions = await self.executor_provider.get_positions()
+            equity = await provider_client.get_account_value()
+            positions = await provider_client.get_positions()
             
             performance_snapshot = PerformanceSnapshot(
                 portfolio_id=portfolio_id,
@@ -75,7 +69,7 @@ class SnapshotJob:
                 if quantity == 0:
                     continue
                 
-                price = await self._get_price(symbol, alpaca_data)
+                price = await self._get_price(symbol)
                 if price is None:
                     logger.warning(f"Skipping {symbol} - failed to fetch price")
                     continue
@@ -154,7 +148,6 @@ class SnapshotJob:
     async def run(self):
         logger.info("Starting snapshot job")
 
-        self.setup_alpaca()
         snapshot_date = date.today()
         
         try:
@@ -173,9 +166,7 @@ class SnapshotJob:
                     async with async_session() as portfolio_session:
                         await self.portfolio_snapshot(
                             portfolio.portfolio_id,
-                            portfolio_session,
-                            self.alpaca_data,
-                            self.alpaca_exec
+                            portfolio_session
                         )
                         await portfolio_session.commit()
                     
@@ -201,10 +192,6 @@ class SnapshotJob:
         except Exception as e:
             logger.error(f"Error in snapshot job: {e}")
             raise
-
-        finally:
-            if self.alpaca_data:
-                await self.alpaca_data.cleanup()
     
     def schedule(self):
         if self.scheduler is not None:
