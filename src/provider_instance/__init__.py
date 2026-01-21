@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 
 from src.marketdata_provider.alpaca import AlpacaMarketData
 from src.execution_provider.alpaca import AlpacaExecutor
@@ -108,6 +109,18 @@ class Engine():
             logger.error(f"Error setting up Alpaca: {e}")
             raise
     
+    async def initialize(self):
+        try:
+            logger.info("Initializing Engine providers...")
+            if self.use_ib:
+                await self.setup_ib()
+            else:
+                self.setup_alpaca()
+            logger.info("Engine providers initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize Engine providers: {e}", exc_info=True)
+            raise
+    
     def get_data_provider(self):
         return self.data_provider
     
@@ -115,3 +128,14 @@ class Engine():
         return self.exec_provider
 
 engine_instance = Engine()
+
+async def main():
+    setup_logging()
+    try:
+        engine_instance = Engine() # grab the singleton instance (does not create a new instance)
+        await engine_instance.initialize()
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        raise
+
+    return engine_instance
