@@ -29,18 +29,52 @@ services:
     command: python3 -m src.database
     restart: "no"
 
-  api:
+  provider-api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: api
+    container_name: provider-api
     depends_on:
       init-db:
         condition: service_completed_successfully
       db:
         condition: service_healthy
     environment:
+      PROVIDER: ${PROVIDER}
+      HTTP_PROXY: ${HTTP_PROXY}
+      HTTPS_PROXY: ${HTTPS_PROXY}
+      ALPACA_API_KEY: ${ALPACA_API_KEY}
+      ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
+      ALPACA_PAPER: ${ALPACA_PAPER}
+      IBKR_HOST: ${IBKR_HOST}
+      IBKR_PORT: ${IBKR_PORT}
+      IBKR_CLIENT_ID: ${IBKR_CLIENT_ID}
+    ports:
+      - "8001:8001"
+    command: python3 -m uvicorn src.provider_instance.server:app --host 0.0.0.0 --port 8001
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  dashboard-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dashboard-api
+    depends_on:
+      init-db:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      provider-api:
+        condition: service_healthy
+    environment:
       DATABASE_URL: ${DATABASE_URL}
+      PROVIDER_API_URL: http://provider-api:8001
     ports:
       - "8000:8000"
     command: python3 -m uvicorn src.server:app --host 0.0.0.0 --port 8000
@@ -62,14 +96,13 @@ services:
         condition: service_completed_successfully
       db:
         condition: service_healthy
+      provider-api:
+        condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      # PROVIDER: ${PROVIDER}
       HTTP_PROXY: ${HTTP_PROXY}
       HTTPS_PROXY: ${HTTPS_PROXY}
-      ALPACA_API_KEY: ${ALPACA_API_KEY}
-      ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
-      ALPACA_PAPER: ${ALPACA_PAPER}
+      PROVIDER_API_URL: http://provider-api:8001
     volumes:
       - ./src/config:/app/src/config:ro
     command: python3 -m src.snapshot_job
@@ -85,14 +118,13 @@ services:
         condition: service_completed_successfully
       db:
         condition: service_healthy
+      provider-api:
+        condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      PROVIDER: ${PROVIDER}
       HTTP_PROXY: ${HTTP_PROXY}
       HTTPS_PROXY: ${HTTPS_PROXY}
-      ALPACA_API_KEY: ${ALPACA_API_KEY}
-      ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
-      ALPACA_PAPER: ${ALPACA_PAPER}
+      PROVIDER_API_URL: http://provider-api:8001
     volumes:
       - ./src/config:/app/src/config:ro
     command: python3 -m src.main
