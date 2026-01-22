@@ -6,7 +6,10 @@ import json
 class ProviderApiClient:
     def __init__(self):
         # default to http://provider-api:8001 TBD make configurable
-        self.client = httpx.AsyncClient(base_url="http://provider-api:8001")
+        self.client = httpx.AsyncClient(
+            base_url="http://provider-api:8001",
+            timeout=httpx.Timeout(None, connect=10.0)
+        )
     
     async def get_price(self, symbol):
         response = await self.client.get(f"/market_data/price/{symbol}")
