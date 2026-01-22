@@ -6,7 +6,7 @@ from typing import Optional
 import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-import pytz
+from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -201,7 +201,7 @@ class SnapshotJob:
         self.scheduler = AsyncIOScheduler()
         
         # setup timezone for EDT
-        est_tz = pytz.timezone('US/Eastern')
+        est_tz = ZoneInfo('US/Eastern')
 
         self.scheduler.add_job(
             self.run,
