@@ -114,15 +114,30 @@ class AllocationEventsResponse(BaseModel):
     """Expected data model for allocation events endpoint"""
     events: List[AllocationEvent]
 
+class PortfolioRequest(BaseModel):
+    portfolio_id: int
+    name: str
+    is_active: bool
+
 class PortfolioResponse(BaseModel):
     """Expected data model for portfolio endpoint"""
-    portfolio: Portfolio
+    portfolio_id: int
+    name: str
+    is_active: bool
 
 @router.post("/portfolio", response_model=PortfolioResponse)
-async def create_portfolio(portfolio: Portfolio, session: AsyncSession = Depends(get_session)):
-    session.add(portfolio)
+async def create_portfolio(portfolio: PortfolioRequest, session: AsyncSession = Depends(get_session)):
+    new_portfolio = Portfolio(name=portfolio.name, is_active=portfolio.is_active)
+
+    session.add(new_portfolio)
     await session.commit()
-    return PortfolioResponse(portfolio=portfolio)
+    await session.refresh(new_portfolio)
+    
+    return PortfolioResponse(
+        portfolio_id=new_portfolio.portfolio_id,
+        name=new_portfolio.name,
+        is_active=new_portfolio.is_active
+    )
 
 @router.post("/portfolio/{id}/stop", response_model=TradeResponse)
 async def stop_trading(id: int, session: AsyncSession = Depends(get_session)):
