@@ -40,9 +40,11 @@ services:
       db:
         condition: service_healthy
     environment:
+      NO_PROXY: localhost,127.0.0.1,db,provider-api ####
+      no_proxy: localhost,127.0.0.1,db,provider-api ####
+      HTTP_PROXY:
+      HTTPS_PROXY:
       PROVIDER: ${PROVIDER}
-      HTTP_PROXY: ${HTTP_PROXY}
-      HTTPS_PROXY: ${HTTPS_PROXY}
       ALPACA_API_KEY: ${ALPACA_API_KEY}
       ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
       ALPACA_PAPER: ${ALPACA_PAPER}
@@ -50,7 +52,7 @@ services:
       IBKR_PORT: ${IBKR_PORT}
       IBKR_CLIENT_ID: ${IBKR_CLIENT_ID}
     ports:
-      - "8001:8001"
+      - "8001:8000"
     command: python3 -m uvicorn src.provider_instance.server:app --host 0.0.0.0 --port 8001
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
@@ -73,10 +75,12 @@ services:
       provider-api:
         condition: service_healthy
     environment:
+      NO_PROXY: localhost,127.0.0.1,db,provider-api
+      no_proxy: localhost,127.0.0.1,db,provider-api ####
       DATABASE_URL: ${DATABASE_URL}
       PROVIDER_API_URL: http://provider-api:8001
     ports:
-      - "8000:8000"
+      - "8002:8000"
     command: python3 -m uvicorn src.server:app --host 0.0.0.0 --port 8000
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -99,6 +103,8 @@ services:
       provider-api:
         condition: service_healthy
     environment:
+      NO_PROXY: localhost,127.0.0.1,db,provider-api
+      no_proxy: localhost,127.0.0.1,db,provider-api ####
       DATABASE_URL: ${DATABASE_URL}
       HTTP_PROXY: ${HTTP_PROXY}
       HTTPS_PROXY: ${HTTPS_PROXY}
@@ -124,6 +130,8 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       HTTP_PROXY: ${HTTP_PROXY}
       HTTPS_PROXY: ${HTTPS_PROXY}
+      NO_PROXY: localhost,127.0.0.1,provider-api,db,dashboard-api
+      no_proxy: localhost,127.0.0.1,provider-api,db,dashboard-api
       PROVIDER_API_URL: http://provider-api:8001
     volumes:
       - ./src/config:/app/src/config:ro
