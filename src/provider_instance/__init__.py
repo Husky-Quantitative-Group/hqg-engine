@@ -37,11 +37,17 @@ class Engine():
     def load_config(self):
         """Load configuration from env"""
 
+        provider = os.environ.get("PROVIDER")
+
         if os.environ.get("PROVIDER") == "ib":
             self.use_ib = True
 
         elif os.environ.get("PROVIDER") == "alpaca":
             self.use_ib = False
+
+        elif provider is None: #temp trying fix
+            self.use_ib = None
+            return
 
         else:
             raise ValueError("Invalid provider")
@@ -111,6 +117,9 @@ class Engine():
     
     async def initialize(self):
         try:
+            if self.use_ib is None: #temp try fix
+                raise ValueError("PROVIDER environment variable not set. Cannot initialize providers.")
+
             logger.info("Initializing Engine providers...")
             if self.use_ib:
                 await self.setup_ib()
