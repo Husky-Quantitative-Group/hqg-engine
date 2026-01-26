@@ -5,9 +5,9 @@ import json
 
 class ProviderApiClient:
     def __init__(self):
-        # default to http://provider-api:8001 TBD make configurable
+        # TODO: make provider API port configurable
         self.client = httpx.AsyncClient(
-            base_url="http://provider-api:8001",
+            base_url="http://provider-api:8000",
             timeout=httpx.Timeout(None, connect=10.0)
         )
     
