@@ -40,10 +40,12 @@ services:
       db:
         condition: service_healthy
     environment:
-      NO_PROXY: localhost,127.0.0.1,db,provider-api ####
-      no_proxy: localhost,127.0.0.1,db,provider-api ####
-      HTTP_PROXY:
-      HTTPS_PROXY:
+      NO_PROXY: ${NO_PROXY}
+      no_proxy: ${no_proxy}
+      HTTP_PROXY: ${HTTP_PROXY}
+      http_proxy: ${http_proxy}
+      HTTPS_PROXY: ${HTTPS_PROXY}
+      https_proxy: ${https_proxy}
       PROVIDER: ${PROVIDER}
       ALPACA_API_KEY: ${ALPACA_API_KEY}
       ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
@@ -53,9 +55,9 @@ services:
       IBKR_CLIENT_ID: ${IBKR_CLIENT_ID}
     ports:
       - "8001:8000"
-    command: python3 -m uvicorn src.provider_instance.server:app --host 0.0.0.0 --port 8001
+    command: python3 -m uvicorn src.provider_instance.server:app --host 0.0.0.0 --port 8000
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -75,12 +77,16 @@ services:
       provider-api:
         condition: service_healthy
     environment:
-      NO_PROXY: localhost,127.0.0.1,db,provider-api
-      no_proxy: localhost,127.0.0.1,db,provider-api ####
+      NO_PROXY: ${NO_PROXY}
+      no_proxy: ${no_proxy}
+      HTTP_PROXY: ${HTTP_PROXY}
+      http_proxy: ${http_proxy}
+      HTTPS_PROXY: ${HTTPS_PROXY}
+      https_proxy: ${https_proxy}
       DATABASE_URL: ${DATABASE_URL}
-      PROVIDER_API_URL: http://provider-api:8001
+      PROVIDER_API_URL: http://provider-api:8000
     ports:
-      - "8002:8000"
+      - "8000:8000"
     command: python3 -m uvicorn src.server:app --host 0.0.0.0 --port 8000
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -103,12 +109,10 @@ services:
       provider-api:
         condition: service_healthy
     environment:
-      NO_PROXY: localhost,127.0.0.1,db,provider-api
-      no_proxy: localhost,127.0.0.1,db,provider-api ####
+      NO_PROXY: ${NO_PROXY}
+      no_proxy: ${no_proxy}
       DATABASE_URL: ${DATABASE_URL}
-      HTTP_PROXY: ${HTTP_PROXY}
-      HTTPS_PROXY: ${HTTPS_PROXY}
-      PROVIDER_API_URL: http://provider-api:8001
+      PROVIDER_API_URL: http://provider-api:8000
     volumes:
       - ./src/config:/app/src/config:ro
     command: python3 -m src.snapshot_job
@@ -128,11 +132,9 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      HTTP_PROXY: ${HTTP_PROXY}
-      HTTPS_PROXY: ${HTTPS_PROXY}
-      NO_PROXY: localhost,127.0.0.1,provider-api,db,dashboard-api
-      no_proxy: localhost,127.0.0.1,provider-api,db,dashboard-api
-      PROVIDER_API_URL: http://provider-api:8001
+      NO_PROXY: ${NO_PROXY}
+      no_proxy: ${no_proxy}
+      PROVIDER_API_URL: http://provider-api:8000
     volumes:
       - ./src/config:/app/src/config:ro
     command: python3 -m src.main
