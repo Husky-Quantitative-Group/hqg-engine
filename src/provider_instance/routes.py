@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -10,6 +10,12 @@ from src.provider_instance import engine_instance
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class RebalanceRequest(BaseModel):
+    target_weights: Dict[str, float]
+    portfolio_value: float
+    market_data: Dict[str, Any]
 
 
 @router.get("/market_data/price/{symbol}")
@@ -125,15 +131,15 @@ async def place_order(symbol, quantity, side):
 
 
 @router.post("/execution/rebalance")
-async def rebalance(target_weights: Dict[str, float], portfolio_value: float, market_data: Dict[str, float]):
+async def rebalance(request: RebalanceRequest):
     try:
         await engine_instance.exec_provider.rebalance(
-            target_weights,
-            portfolio_value,
-            market_data
+            request.target_weights,
+            request.portfolio_value,
+            request.market_data
         )
         
-        return {"status": "rebalanced", "target_weights": target_weights}
+        return {"status": "rebalanced", "target_weights": request.target_weights}
         
     except Exception as e:
         logger.error(f"Error rebalancing: {e}", exc_info=True)
