@@ -1,11 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from src.provider_instance.routes import router
-from src.provider_instance import engine_instance
+from src.provider_instance import engine_instance, setup_logging
 
 app = FastAPI(
     title="Provider Service API",
-    description="API for accessing Engine and provider",
+    description="API for accessing Engine and providers",
     version="1.0.0"
 )
 
@@ -21,7 +21,7 @@ app.include_router(router)
 
 @app.on_event("startup")
 async def startup():
-    """Initialize Engine providers when service starts"""
+    setup_logging()
     await engine_instance.initialize()
 
 @app.get("/health")
