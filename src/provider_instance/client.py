@@ -2,13 +2,17 @@
 
 import httpx
 import json
+import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ProviderApiClient:
     def __init__(self):
-        # TODO: make provider API port configurable
+
         self.client = httpx.AsyncClient(
-            base_url="http://provider-api:8000",
-            timeout=httpx.Timeout(None, connect=10.0)
+            base_url=os.environ.get("PROVIDER_API_URL"),
+            timeout=httpx.Timeout(None, connect=10.0),
         )
     
     async def get_price(self, symbol):
@@ -18,15 +22,22 @@ class ProviderApiClient:
     
     async def stream_prices(self, symbols):
         symbols_str = ",".join(symbols)
-        async with self.client.stream(
-            "GET",
-            "/market_data/stream",
-            params={"symbols": symbols_str}
-        ) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if line.startswith("data: "):
-                    yield json.loads(line[6:]) # remove "data: "
+        try:
+            async with self.client.stream(
+                "GET",
+                "/market_data/stream",
+                params={"symbols": symbols_str}
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        data = json.loads(line[6:]) # remove "data: "
+                        if isinstance(data, dict) and 'symbol' in data:
+                            yield data
+        
+        except Exception as e:
+            logger.error(f"Error in stream_prices: {e}", exc_info=True)
+            raise
     
     async def pause_stream(self):
         response = await self.client.post("/market_data/pause")
