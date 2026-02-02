@@ -1,5 +1,6 @@
 import asyncio 
 import logging
+import os
 from datetime import datetime
 from typing import AsyncIterator, Dict, List
 from alpaca.data.requests import StockLatestQuoteRequest
@@ -13,6 +14,9 @@ logger = logging.getLogger(__name__)
 
 class AlpacaMarketData(MarketData):
     def __init__(self, api_key: str, secret_key: str, paper: bool = True, poll_interval: float = 30.0):
+        https_proxy = os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy')
+        http_proxy = os.environ.get('HTTP_PROXY') or os.environ.get('http_proxy')
+        
         self.data_client = StockHistoricalDataClient(
             api_key=api_key,
             secret_key=secret_key
@@ -41,7 +45,7 @@ class AlpacaMarketData(MarketData):
                 'price': quote_data.ask_price,
                 'bid': quote_data.bid_price,
                 'ask': quote_data.ask_price,
-                'timestamp': datetime.now(),
+                'timestamp': datetime.now().isoformat(),
                 'source': 'alpaca'
             }
             
@@ -119,7 +123,7 @@ class AlpacaMarketData(MarketData):
                 'ask': quote_data.ask_price,
                 'bid_size': quote_data.bid_size,
                 'ask_size': quote_data.ask_size,
-                'timestamp': datetime.now(),
+                'timestamp': datetime.now().isoformat(),
                 'volume': quote_data.bid_size + quote_data.ask_size,
                 'source': 'alpaca'
             }
