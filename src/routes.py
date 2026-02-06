@@ -1,13 +1,16 @@
 from enum import Enum
 from typing import Optional, List, Dict
 import statistics
+import logging
 from fastapi import APIRouter, HTTPException, Depends
 from datetime import date, datetime, timedelta
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_session
-from src.main import Engine
+from src.provider_instance.client import provider_client
+
+logger = logging.getLogger(__name__)
 
 from src.db.models import (
     Portfolio,
@@ -111,7 +114,30 @@ class AllocationEventsResponse(BaseModel):
     """Expected data model for allocation events endpoint"""
     events: List[AllocationEvent]
 
+class PortfolioRequest(BaseModel):
+    portfolio_id: int
+    name: str
+    is_active: bool
 
+class PortfolioResponse(BaseModel):
+    """Expected data model for portfolio endpoint"""
+    portfolio_id: int
+    name: str
+    is_active: bool
+
+@router.post("/portfolio", response_model=PortfolioResponse)
+async def create_portfolio(portfolio: PortfolioRequest, session: AsyncSession = Depends(get_session)):
+    new_portfolio = Portfolio(name=portfolio.name, is_active=portfolio.is_active)
+
+    session.add(new_portfolio)
+    await session.commit()
+    await session.refresh(new_portfolio)
+    
+    return PortfolioResponse(
+        portfolio_id=new_portfolio.portfolio_id,
+        name=new_portfolio.name,
+        is_active=new_portfolio.is_active
+    )
 
 @router.post("/portfolio/{id}/stop", response_model=TradeResponse)
 async def stop_trading(id: int, session: AsyncSession = Depends(get_session)):
@@ -142,9 +168,8 @@ async def liquidate_all(id: int, session: AsyncSession = Depends(get_session)):
     portfolio = await get_portfolio(id, session)
 
     try:
-        executor = Engine().get_exec_provider()
         logger.info(f"Liquidating portfolio {id}")
-        await executor.liquidate_portfolio()
+        await provider_client.liquidate()
         
         portfolio.is_active = False
         await session.commit()

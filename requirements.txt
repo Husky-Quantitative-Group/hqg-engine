@@ -9,3 +9,6 @@ uvicorn==0.27.1
 pydantic==2.6.1
 alpaca-py>=0.43.2
 pytz==2025.2
+tzdata==2025.1
+httpx==0.28.1
+httpcore==1.0.9

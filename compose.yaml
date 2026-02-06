@@ -9,9 +9,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -20,6 +20,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY}
+        HTTPS_PROXY: ${HTTPS_PROXY}
+        NO_PROXY: ${NO_PROXY}
+        http_proxy: ${http_proxy}
+        https_proxy: ${https_proxy}
+        no_proxy: ${no_proxy}
     container_name: init-db
     depends_on:
       db:
@@ -29,18 +36,76 @@ services:
     command: python3 -m src.database
     restart: "no"
 
-  api:
+  provider-api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: api
+      args:
+        HTTP_PROXY: ${HTTP_PROXY}
+        HTTPS_PROXY: ${HTTPS_PROXY}
+        NO_PROXY: ${NO_PROXY}
+        http_proxy: ${http_proxy}
+        https_proxy: ${https_proxy}
+        no_proxy: ${no_proxy}
+    container_name: provider-api
     depends_on:
       init-db:
         condition: service_completed_successfully
       db:
         condition: service_healthy
     environment:
+      NO_PROXY: ${NO_PROXY}
+      no_proxy: ${no_proxy}
+      HTTP_PROXY: ${HTTP_PROXY}
+      http_proxy: ${http_proxy}
+      HTTPS_PROXY: ${HTTPS_PROXY}
+      https_proxy: ${https_proxy}
+      PROVIDER: ${PROVIDER}
+      ALPACA_API_KEY: ${ALPACA_API_KEY}
+      ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
+      ALPACA_PAPER: ${ALPACA_PAPER}
+      IBKR_HOST: ${IBKR_HOST}
+      IBKR_PORT: ${IBKR_PORT}
+      IBKR_CLIENT_ID: ${IBKR_CLIENT_ID}
+    ports:
+      - "8001:8000"
+    command: python3 -m uvicorn src.provider_instance.server:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  dashboard-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY}
+        HTTPS_PROXY: ${HTTPS_PROXY}
+        NO_PROXY: ${NO_PROXY}
+        http_proxy: ${http_proxy}
+        https_proxy: ${https_proxy}
+        no_proxy: ${no_proxy}
+    container_name: dashboard-api
+    depends_on:
+      init-db:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      provider-api:
+        condition: service_healthy
+    environment:
+      NO_PROXY: ${NO_PROXY}
+      no_proxy: ${no_proxy}
+      HTTP_PROXY: ${HTTP_PROXY}
+      http_proxy: ${http_proxy}
+      HTTPS_PROXY: ${HTTPS_PROXY}
+      https_proxy: ${https_proxy}
       DATABASE_URL: ${DATABASE_URL}
+      PROVIDER_API_URL: http://provider-api:8000
     ports:
       - "8000:8000"
     command: python3 -m uvicorn src.server:app --host 0.0.0.0 --port 8000
@@ -56,14 +121,26 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY}
+        HTTPS_PROXY: ${HTTPS_PROXY}
+        NO_PROXY: ${NO_PROXY}
+        http_proxy: ${http_proxy}
+        https_proxy: ${https_proxy}
+        no_proxy: ${no_proxy}
     container_name: snapshot
     depends_on:
       init-db:
         condition: service_completed_successfully
       db:
         condition: service_healthy
+      provider-api:
+        condition: service_healthy
     environment:
+      NO_PROXY: ${NO_PROXY}
+      no_proxy: ${no_proxy}
       DATABASE_URL: ${DATABASE_URL}
+      PROVIDER_API_URL: http://provider-api:8000
     volumes:
       - ./src/config:/app/src/config:ro
     command: python3 -m src.snapshot_job
@@ -73,14 +150,26 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY}
+        HTTPS_PROXY: ${HTTPS_PROXY}
+        NO_PROXY: ${NO_PROXY}
+        http_proxy: ${http_proxy}
+        https_proxy: ${https_proxy}
+        no_proxy: ${no_proxy}
     container_name: engine
     depends_on:
       init-db:
         condition: service_completed_successfully
       db:
         condition: service_healthy
+      provider-api:
+        condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      NO_PROXY: ${NO_PROXY}
+      no_proxy: ${no_proxy}
+      PROVIDER_API_URL: http://provider-api:8000
     volumes:
       - ./src/config:/app/src/config:ro
     command: python3 -m src.main
