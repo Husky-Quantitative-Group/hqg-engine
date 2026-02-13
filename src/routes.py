@@ -228,22 +228,6 @@ async def get_snapshot(id: int, timeframe: Optional[Timeframe] = None, session: 
     if not performance_snapshots:
         raise HTTPException(status_code=404, detail=f"No snapshot found for portfolio {id}")
     
-    performance_snapshot = performance_snapshots[0]
-    snapshot_date = performance_snapshot.as_of
-    equity = float(performance_snapshot.equity)
-    
-    # get holdings for the snapshot date (to calculate capital)
-    holdings_query = select(HoldingsSnapshot).where(
-        HoldingsSnapshot.portfolio_id == id,
-        HoldingsSnapshot.as_of == snapshot_date
-    )
-
-    holdings_result = await session.execute(holdings_query)
-    holdings = holdings_result.scalars().all()
-    
-    capital = sum(float(holding.market_value) for holding in holdings)
-    
-    # get baseline snapshot (for profit/return calculations)
     baseline_query = select(PerformanceSnapshot).where(PerformanceSnapshot.portfolio_id == id)
     
     baseline_query = baseline_query.where(PerformanceSnapshot.as_of >= start_date)
@@ -256,17 +240,36 @@ async def get_snapshot(id: int, timeframe: Optional[Timeframe] = None, session: 
         raise HTTPException(status_code=404, detail=f"No baseline snapshot found for portfolio {id}")
     
     initial_capital = float(baseline_snapshot.equity)
-    
-    # calculate performance metrics
-    net_profit = equity - initial_capital
-    return_pct = net_profit / initial_capital if initial_capital > 0 else 0.0
 
-    return SnapshotResponse(
-        equity=equity,
-        capital=capital,
-        net_profit=net_profit,
-        return_pct=return_pct
-    )
+    snapshot_data_list = []
+    for performance_snapshot in performance_snapshots:
+        snapshot_date = performance_snapshot.as_of
+        equity = float(performance_snapshot.equity)
+        
+        # get holdings for the snapshot date (to calculate capital)
+        holdings_query = select(HoldingsSnapshot).where(
+            HoldingsSnapshot.portfolio_id == id,
+            HoldingsSnapshot.as_of == snapshot_date
+        )
+
+        holdings_result = await session.execute(holdings_query)
+        holdings = holdings_result.scalars().all()
+        
+        capital = sum(float(holding.market_value) for holding in holdings)
+        
+        # calculate performance metrics
+        net_profit = equity - initial_capital
+        return_pct = net_profit / initial_capital if initial_capital > 0 else 0.0
+        
+        snapshot_data_list.append(SnapshotData(
+            equity=equity,
+            capital=capital,
+            net_profit=net_profit,
+            return_pct=return_pct,
+            as_of=snapshot_date.isoformat()
+        ))
+
+    return SnapshotResponse(snapshots=snapshot_data_list)
 
 @router.get("/portfolio/{id}/metrics", response_model=MetricsResponse)
 async def get_metrics(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
