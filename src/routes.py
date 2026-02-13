@@ -67,14 +67,17 @@ class EquityResponse(BaseModel):
     """Expected data model for equity curve endpoint"""
     data: List[EquityPoint]
 
-class SnapshotResponse(BaseModel):
-    """Expected data model for portfolio snapshot endpoint"""
-    # TODO: Define structure for main metrics
-    # Expected: equity, capital, net_profit, return_pct
+class SnapshotData(BaseModel):
+    """Expected data model for individual snapshot data point"""
     equity: float
     capital: float
     net_profit: float
     return_pct: float
+    as_of: str
+
+class SnapshotResponse(BaseModel):
+    """Expected data model for portfolio snapshot endpoint"""
+    snapshots: List[SnapshotData] # will return up to 3 most recent snapshots
 
 class MetricsResponse(BaseModel):
     """Expected data model for portfolio metrics"""
