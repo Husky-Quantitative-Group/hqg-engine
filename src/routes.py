@@ -220,13 +220,15 @@ async def get_snapshot(id: int, timeframe: Optional[Timeframe] = None, session: 
     start_date = timeframe_to_date_range(timeframe)
     query = query.where(PerformanceSnapshot.as_of >= start_date)
     query = query.order_by(PerformanceSnapshot.as_of.desc())
+    query = query.limit(3)
     
     result = await session.execute(query)
-    performance_snapshot = result.scalar_one_or_none()
+    performance_snapshots = result.scalars().all()
 
-    if performance_snapshot is None:
+    if not performance_snapshots:
         raise HTTPException(status_code=404, detail=f"No snapshot found for portfolio {id}")
     
+    performance_snapshot = performance_snapshots[0]
     snapshot_date = performance_snapshot.as_of
     equity = float(performance_snapshot.equity)
     
@@ -248,7 +250,11 @@ async def get_snapshot(id: int, timeframe: Optional[Timeframe] = None, session: 
     baseline_query = baseline_query.order_by(PerformanceSnapshot.as_of)
 
     baseline_result = await session.execute(baseline_query)
-    baseline_snapshot = baseline_result.scalar_one_or_none()
+    baseline_snapshot = baseline_result.scalars().first()
+    
+    if baseline_snapshot is None:
+        raise HTTPException(status_code=404, detail=f"No baseline snapshot found for portfolio {id}")
+    
     initial_capital = float(baseline_snapshot.equity)
     
     # calculate performance metrics
