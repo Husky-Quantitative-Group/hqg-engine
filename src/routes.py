@@ -362,7 +362,7 @@ async def get_strategy_allocations(id: int, session: AsyncSession = Depends(get_
     return StrategyAllocationsResponse(allocations=allocations)
 
 @router.get("/portfolio/{id}/allocations/assets", response_model=AssetAllocationsResponse)
-async def get_asset_allocations(id: int, timeframe, session: AsyncSession = Depends(get_session)):
+async def get_asset_allocations(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
     await get_portfolio(id, session)
     start_date = timeframe_to_date_range(timeframe)
     snapshot_query = select(PerformanceSnapshot).where(PerformanceSnapshot.portfolio_id == id)
@@ -373,6 +373,9 @@ async def get_asset_allocations(id: int, timeframe, session: AsyncSession = Depe
     snapshot_query = snapshot_query.order_by(PerformanceSnapshot.as_of.desc())
     snapshot_result = await session.execute(snapshot_query)
     most_recent_snapshot = snapshot_result.scalars().first()
+    
+    if most_recent_snapshot is None:
+        return AssetAllocationsResponse(allocations={})
     
     holdings_query = select(HoldingsSnapshot, Instrument.ticker).join(
         Instrument, HoldingsSnapshot.instrument_id == Instrument.instrument_id
@@ -402,8 +405,10 @@ async def get_execution_events(id: int, timeframe: Optional[Timeframe] = None, s
 
     query = select(ExecutionEventDB).where(ExecutionEventDB.portfolio_id == id)
     start_date = timeframe_to_date_range(timeframe)
-    query = query.where(ExecutionEventDB.timestamp >= start_date)
-    
+
+    if start_date is not None:
+        query = query.where(ExecutionEventDB.timestamp >= start_date)
+        
     query = query.order_by(ExecutionEventDB.timestamp.desc())
     result = await session.execute(query)
     execution_events = result.scalars().all()
@@ -428,8 +433,10 @@ async def get_allocation_events(id: int, timeframe: Optional[Timeframe] = None, 
 
     query = select(AllocationEventDB).where(AllocationEventDB.portfolio_id == id)
     start_date = timeframe_to_date_range(timeframe)
-    query = query.where(AllocationEventDB.timestamp >= start_date)
     
+    if start_date is not None:
+        query = query.where(AllocationEventDB.timestamp >= start_date)
+
     query = query.order_by(AllocationEventDB.timestamp.desc())
     result = await session.execute(query)
     allocation_events = result.scalars().all()
