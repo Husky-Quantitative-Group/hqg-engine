@@ -93,9 +93,8 @@ class StrategyAllocationsResponse(BaseModel):
 
 class AssetAllocationsResponse(BaseModel):
     """Expected data model for asset allocations"""
-    # TODO: Define structure for allocations by asset symbol
-    # Expected: Dict of symbol -> allocation mapping
-    allocations: Dict[str, float]
+    # Returns actual holdings: {symbol: {"quantity": float, "market_value": float}}
+    allocations: Dict[str, Dict[str, float]]
 
 class ExecutionEvent(BaseModel):
     """Data model for individual execution events (buy/sell orders)"""
@@ -363,21 +362,35 @@ async def get_strategy_allocations(id: int, session: AsyncSession = Depends(get_
     return StrategyAllocationsResponse(allocations=allocations)
 
 @router.get("/portfolio/{id}/allocations/assets", response_model=AssetAllocationsResponse)
-async def get_asset_allocations(id: int, session: AsyncSession = Depends(get_session)):
-    """get asset allocations"""
-
+async def get_asset_allocations(id: int, timeframe, session: AsyncSession = Depends(get_session)):
     await get_portfolio(id, session)
+    start_date = timeframe_to_date_range(timeframe)
+    snapshot_query = select(PerformanceSnapshot).where(PerformanceSnapshot.portfolio_id == id)
     
-    query = select(AllocationEventDB).where(AllocationEventDB.portfolio_id == id)
-    query = query.order_by(AllocationEventDB.timestamp.desc())
-    result = await session.execute(query)
-    allocation_event = result.scalar_one_or_none()
+    if start_date:
+        snapshot_query = snapshot_query.where(PerformanceSnapshot.as_of >= start_date)
     
-    if allocation_event is None:
-        return AssetAllocationsResponse(allocations={})
+    snapshot_query = snapshot_query.order_by(PerformanceSnapshot.as_of.desc())
+    snapshot_result = await session.execute(snapshot_query)
+    most_recent_snapshot = snapshot_result.scalars().first()
     
-    allocations = allocation_event.allocations
-    allocations = {item["symbol"]: float(item["weight"]) for item in allocations}
+    holdings_query = select(HoldingsSnapshot, Instrument.ticker).join(
+        Instrument, HoldingsSnapshot.instrument_id == Instrument.instrument_id
+    )
+    holdings_query = holdings_query.where(
+        HoldingsSnapshot.portfolio_id == id,
+        HoldingsSnapshot.as_of == most_recent_snapshot.as_of
+    )
+    holdings_result = await session.execute(holdings_query)
+    holdings = holdings_result.all()
+    
+    allocations = {
+        ticker: {
+            "quantity": float(holding.quantity),
+            "market_value": float(holding.market_value)
+        }
+        for holding, ticker in holdings
+    }
     
     return AssetAllocationsResponse(allocations=allocations)
 
