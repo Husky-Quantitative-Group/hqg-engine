@@ -405,10 +405,8 @@ async def get_execution_events(id: int, timeframe: Optional[Timeframe] = None, s
 
     query = select(ExecutionEventDB).where(ExecutionEventDB.portfolio_id == id)
     start_date = timeframe_to_date_range(timeframe)
-
-    if start_date is not None:
-        query = query.where(ExecutionEventDB.timestamp >= start_date)
-        
+    query = query.where(ExecutionEventDB.timestamp >= start_date)
+    
     query = query.order_by(ExecutionEventDB.timestamp.desc())
     result = await session.execute(query)
     execution_events = result.scalars().all()
@@ -433,10 +431,8 @@ async def get_allocation_events(id: int, timeframe: Optional[Timeframe] = None, 
 
     query = select(AllocationEventDB).where(AllocationEventDB.portfolio_id == id)
     start_date = timeframe_to_date_range(timeframe)
+    query = query.where(AllocationEventDB.timestamp >= start_date)
     
-    if start_date is not None:
-        query = query.where(AllocationEventDB.timestamp >= start_date)
-
     query = query.order_by(AllocationEventDB.timestamp.desc())
     result = await session.execute(query)
     allocation_events = result.scalars().all()
