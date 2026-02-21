@@ -1,9 +1,10 @@
 import asyncio
 import logging
+from datetime import datetime
 
 from src.portfolio import Portfolio
 from src.database import async_session
-from src.db.models import Portfolio as PortfolioDB
+from src.db.models import Portfolio as PortfolioDB, AllocationEvent as AllocationEventDB
 from sqlalchemy import select
 from src.provider_instance.client import provider_client
 
@@ -57,6 +58,15 @@ async def run():
                         # Execute rebalancing
                         logger.info(f"Rebalancing with target weights:{target_weights}")
                         await provider_client.rebalance(target_weights, portfolio_value, market_data)
+
+                        if target_weights is not None:
+                            allocation_event = AllocationEventDB(
+                                portfolio_id=db_portfolio.portfolio_id,
+                                timestamp=datetime.utcnow(),
+                                allocations=target_weights,
+                            )
+                            session.add(allocation_event)
+                            await session.commit()
                 
                 # Reset market data & wait 1 min before continuing
                 # unless we want to use stream to calc ohlc... (currently only snapshot at 1 min intervals, not "1 min data")
