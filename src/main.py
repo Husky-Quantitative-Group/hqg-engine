@@ -1,14 +1,18 @@
 import asyncio
 import logging
 from datetime import datetime
+from math import trunc
 
 from src.portfolio import Portfolio
 from src.database import async_session
-from src.db.models import Portfolio as PortfolioDB, AllocationEvent as AllocationEventDB
+from src.db.models import (Portfolio as PortfolioDB, AllocationEvent as AllocationEventDB, ExecutionEvent as ExecutionEventDB, Action)
 from sqlalchemy import select
 from src.provider_instance.client import provider_client
 
 logger = logging.getLogger(__name__)
+
+def truncate(value: float) -> float:
+    return trunc(float(value) * 1000) / 1000
 
 def setup_logging():
     logging.basicConfig(
@@ -54,10 +58,35 @@ async def run():
                         # Get current account value
                         portfolio_value = await provider_client.get_account_value()
                         logger.info(f"Current account value: ${portfolio_value:,.2f}")
-                        
+
+                        pos_before = await provider_client.get_positions()
+
                         # Execute rebalancing
                         logger.info(f"Rebalancing with target weights:{target_weights}")
                         await provider_client.rebalance(target_weights, portfolio_value, market_data)
+
+                        pos_after = await provider_client.get_positions()
+                        execution_events = []
+                        symbols = set(pos_before.keys()) | set(pos_after.keys())
+
+                        for symbol in symbols:
+                            quantity_before = float(pos_before.get(symbol, 0.0))
+                            quantity_after = float(pos_after.get(symbol, 0.0))
+                            quantity_change = truncate(quantity_after - quantity_before)
+
+                            if quantity_change == 0.0:
+                                continue
+
+                            action = Action.BUY if quantity_change > 0 else Action.SELL
+                            execution_events.append(
+                                ExecutionEventDB(
+                                    portfolio_id=db_portfolio.portfolio_id,
+                                    timestamp=datetime.utcnow(),
+                                    action=action,
+                                    symbol=symbol,
+                                    quantity=abs(quantity_change),
+                                )
+                            )
 
                         if target_weights is not None:
                             allocation_event = AllocationEventDB(
@@ -66,6 +95,11 @@ async def run():
                                 allocations=target_weights,
                             )
                             session.add(allocation_event)
+
+                        if execution_events:
+                            session.add_all(execution_events)
+
+                        if target_weights is not None or execution_events:
                             await session.commit()
                 
                 # Reset market data & wait 1 min before continuing
