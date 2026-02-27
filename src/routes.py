@@ -96,6 +96,10 @@ class AssetAllocationsResponse(BaseModel):
     # Returns actual holdings: {symbol: {"quantity": float, "market_value": float}}
     allocations: Dict[str, Dict[str, float]]
 
+class AllocationEventWeightsResponse(BaseModel):
+    """Expected data model for allocation event weights"""
+    allocations: Dict[str, float]
+
 class ExecutionEvent(BaseModel):
     """Data model for individual execution events (buy/sell orders)"""
     action: str
@@ -110,7 +114,7 @@ class ExecutionEventsResponse(BaseModel):
 class AllocationEvent(BaseModel):
     """Data model for portfolio allocation/rebalancing events"""
     timestamp: str
-    allocations: AssetAllocationsResponse
+    allocations: AllocationEventWeightsResponse
 
 class AllocationEventsResponse(BaseModel):
     """Expected data model for allocation events endpoint"""
@@ -431,19 +435,49 @@ async def get_allocation_events(id: int, timeframe: Optional[Timeframe] = None, 
 
     query = select(AllocationEventDB).where(AllocationEventDB.portfolio_id == id)
     start_date = timeframe_to_date_range(timeframe)
-    query = query.where(AllocationEventDB.timestamp >= start_date)
+    if start_date is not None:
+        query = query.where(AllocationEventDB.timestamp >= start_date)
     
     query = query.order_by(AllocationEventDB.timestamp.desc())
     result = await session.execute(query)
-    allocation_events = result.scalars().all()
+    rows = result.scalars().all()
 
-    if allocation_events is None:
+    if not rows:
         return AllocationEventsResponse(events=[])
     
-    events = [
-        AllocationEvent(
-            timestamp=allocation_event.timestamp.isoformat(),
-            allocations=allocation_event.allocations
-        ) for allocation_event in allocation_events
-    ]
+    events = []
+    for row in rows:
+        allocations = row.allocations
+        raw_allocations = allocations
+
+        if isinstance(allocations, dict):
+            nested_allocations = allocations.get("allocations")
+            if isinstance(nested_allocations, dict):
+                raw_allocations = nested_allocations
+
+        parsed_allocations: Dict[str, float] = {}
+        if isinstance(raw_allocations, dict):
+            for symbol, value in raw_allocations.items():
+                if isinstance(value, dict):
+                    # necessary for old data
+                    weight_value = value.get("weight")
+                    if weight_value is None:
+                        continue
+                    try:
+                        parsed_allocations[str(symbol)] = float(weight_value)
+                    except (TypeError, ValueError):
+                        continue
+                else:
+                    try:
+                        parsed_allocations[str(symbol)] = float(value)
+                    except (TypeError, ValueError):
+                        continue
+
+        events.append(
+            AllocationEvent(
+                timestamp=row.timestamp.isoformat(),
+                allocations=AllocationEventWeightsResponse(allocations=parsed_allocations),
+            )
+        )
+
     return AllocationEventsResponse(events=events)
