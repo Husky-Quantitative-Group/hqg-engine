@@ -67,14 +67,17 @@ class EquityResponse(BaseModel):
     """Expected data model for equity curve endpoint"""
     data: List[EquityPoint]
 
-class SnapshotResponse(BaseModel):
-    """Expected data model for portfolio snapshot endpoint"""
-    # TODO: Define structure for main metrics
-    # Expected: equity, capital, net_profit, return_pct
+class SnapshotData(BaseModel):
+    """Expected data model for individual snapshot data point"""
     equity: float
     capital: float
     net_profit: float
     return_pct: float
+    as_of: str
+
+class SnapshotResponse(BaseModel):
+    """Expected data model for portfolio snapshot endpoint"""
+    snapshots: List[SnapshotData] # will return up to 3 most recent snapshots
 
 class MetricsResponse(BaseModel):
     """Expected data model for portfolio metrics"""
@@ -90,8 +93,11 @@ class StrategyAllocationsResponse(BaseModel):
 
 class AssetAllocationsResponse(BaseModel):
     """Expected data model for asset allocations"""
-    # TODO: Define structure for allocations by asset symbol
-    # Expected: Dict of symbol -> allocation mapping
+    # Returns actual holdings: {symbol: {"quantity": float, "market_value": float}}
+    allocations: Dict[str, Dict[str, float]]
+
+class AllocationEventWeightsResponse(BaseModel):
+    """Expected data model for allocation event weights"""
     allocations: Dict[str, float]
 
 class ExecutionEvent(BaseModel):
@@ -108,7 +114,7 @@ class ExecutionEventsResponse(BaseModel):
 class AllocationEvent(BaseModel):
     """Data model for portfolio allocation/rebalancing events"""
     timestamp: str
-    allocations: AssetAllocationsResponse
+    allocations: AllocationEventWeightsResponse
 
 class AllocationEventsResponse(BaseModel):
     """Expected data model for allocation events endpoint"""
@@ -217,47 +223,56 @@ async def get_snapshot(id: int, timeframe: Optional[Timeframe] = None, session: 
     start_date = timeframe_to_date_range(timeframe)
     query = query.where(PerformanceSnapshot.as_of >= start_date)
     query = query.order_by(PerformanceSnapshot.as_of.desc())
+    query = query.limit(3)
     
     result = await session.execute(query)
-    performance_snapshot = result.scalar_one_or_none()
+    performance_snapshots = result.scalars().all()
 
-    if performance_snapshot is None:
+    if not performance_snapshots:
         raise HTTPException(status_code=404, detail=f"No snapshot found for portfolio {id}")
     
-    snapshot_date = performance_snapshot.as_of
-    equity = float(performance_snapshot.equity)
-    
-    # get holdings for the snapshot date (to calculate capital)
-    holdings_query = select(HoldingsSnapshot).where(
-        HoldingsSnapshot.portfolio_id == id,
-        HoldingsSnapshot.as_of == snapshot_date
-    )
-
-    holdings_result = await session.execute(holdings_query)
-    holdings = holdings_result.scalars().all()
-    
-    capital = sum(float(holding.market_value) for holding in holdings)
-    
-    # get baseline snapshot (for profit/return calculations)
     baseline_query = select(PerformanceSnapshot).where(PerformanceSnapshot.portfolio_id == id)
     
     baseline_query = baseline_query.where(PerformanceSnapshot.as_of >= start_date)
     baseline_query = baseline_query.order_by(PerformanceSnapshot.as_of)
 
     baseline_result = await session.execute(baseline_query)
-    baseline_snapshot = baseline_result.scalar_one_or_none()
-    initial_capital = float(baseline_snapshot.equity)
+    baseline_snapshot = baseline_result.scalars().first()
     
-    # calculate performance metrics
-    net_profit = equity - initial_capital
-    return_pct = net_profit / initial_capital if initial_capital > 0 else 0.0
+    if baseline_snapshot is None:
+        raise HTTPException(status_code=404, detail=f"No baseline snapshot found for portfolio {id}")
+    
+    initial_capital = float(baseline_snapshot.equity)
 
-    return SnapshotResponse(
-        equity=equity,
-        capital=capital,
-        net_profit=net_profit,
-        return_pct=return_pct
-    )
+    snapshot_data_list = []
+    for performance_snapshot in performance_snapshots:
+        snapshot_date = performance_snapshot.as_of
+        equity = float(performance_snapshot.equity)
+        
+        # get holdings for the snapshot date (to calculate capital)
+        holdings_query = select(HoldingsSnapshot).where(
+            HoldingsSnapshot.portfolio_id == id,
+            HoldingsSnapshot.as_of == snapshot_date
+        )
+
+        holdings_result = await session.execute(holdings_query)
+        holdings = holdings_result.scalars().all()
+        
+        capital = sum(float(holding.market_value) for holding in holdings)
+        
+        # calculate performance metrics
+        net_profit = equity - initial_capital
+        return_pct = net_profit / initial_capital if initial_capital > 0 else 0.0
+        
+        snapshot_data_list.append(SnapshotData(
+            equity=equity,
+            capital=capital,
+            net_profit=net_profit,
+            return_pct=return_pct,
+            as_of=snapshot_date.isoformat()
+        ))
+
+    return SnapshotResponse(snapshots=snapshot_data_list)
 
 @router.get("/portfolio/{id}/metrics", response_model=MetricsResponse)
 async def get_metrics(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
@@ -351,21 +366,38 @@ async def get_strategy_allocations(id: int, session: AsyncSession = Depends(get_
     return StrategyAllocationsResponse(allocations=allocations)
 
 @router.get("/portfolio/{id}/allocations/assets", response_model=AssetAllocationsResponse)
-async def get_asset_allocations(id: int, session: AsyncSession = Depends(get_session)):
-    """get asset allocations"""
-
+async def get_asset_allocations(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
     await get_portfolio(id, session)
+    start_date = timeframe_to_date_range(timeframe)
+    snapshot_query = select(PerformanceSnapshot).where(PerformanceSnapshot.portfolio_id == id)
     
-    query = select(AllocationEventDB).where(AllocationEventDB.portfolio_id == id)
-    query = query.order_by(AllocationEventDB.timestamp.desc())
-    result = await session.execute(query)
-    allocation_event = result.scalar_one_or_none()
+    if start_date:
+        snapshot_query = snapshot_query.where(PerformanceSnapshot.as_of >= start_date)
     
-    if allocation_event is None:
+    snapshot_query = snapshot_query.order_by(PerformanceSnapshot.as_of.desc())
+    snapshot_result = await session.execute(snapshot_query)
+    most_recent_snapshot = snapshot_result.scalars().first()
+    
+    if most_recent_snapshot is None:
         return AssetAllocationsResponse(allocations={})
     
-    allocations = allocation_event.allocations
-    allocations = {item["symbol"]: float(item["weight"]) for item in allocations}
+    holdings_query = select(HoldingsSnapshot, Instrument.ticker).join(
+        Instrument, HoldingsSnapshot.instrument_id == Instrument.instrument_id
+    )
+    holdings_query = holdings_query.where(
+        HoldingsSnapshot.portfolio_id == id,
+        HoldingsSnapshot.as_of == most_recent_snapshot.as_of
+    )
+    holdings_result = await session.execute(holdings_query)
+    holdings = holdings_result.all()
+    
+    allocations = {
+        ticker: {
+            "quantity": float(holding.quantity),
+            "market_value": float(holding.market_value)
+        }
+        for holding, ticker in holdings
+    }
     
     return AssetAllocationsResponse(allocations=allocations)
 
@@ -403,19 +435,49 @@ async def get_allocation_events(id: int, timeframe: Optional[Timeframe] = None, 
 
     query = select(AllocationEventDB).where(AllocationEventDB.portfolio_id == id)
     start_date = timeframe_to_date_range(timeframe)
-    query = query.where(AllocationEventDB.timestamp >= start_date)
+    if start_date is not None:
+        query = query.where(AllocationEventDB.timestamp >= start_date)
     
     query = query.order_by(AllocationEventDB.timestamp.desc())
     result = await session.execute(query)
-    allocation_events = result.scalars().all()
+    rows = result.scalars().all()
 
-    if allocation_events is None:
+    if not rows:
         return AllocationEventsResponse(events=[])
     
-    events = [
-        AllocationEvent(
-            timestamp=allocation_event.timestamp.isoformat(),
-            allocations=allocation_event.allocations
-        ) for allocation_event in allocation_events
-    ]
+    events = []
+    for row in rows:
+        allocations = row.allocations
+        raw_allocations = allocations
+
+        if isinstance(allocations, dict):
+            nested_allocations = allocations.get("allocations")
+            if isinstance(nested_allocations, dict):
+                raw_allocations = nested_allocations
+
+        parsed_allocations: Dict[str, float] = {}
+        if isinstance(raw_allocations, dict):
+            for symbol, value in raw_allocations.items():
+                if isinstance(value, dict):
+                    # necessary for old data
+                    weight_value = value.get("weight")
+                    if weight_value is None:
+                        continue
+                    try:
+                        parsed_allocations[str(symbol)] = float(weight_value)
+                    except (TypeError, ValueError):
+                        continue
+                else:
+                    try:
+                        parsed_allocations[str(symbol)] = float(value)
+                    except (TypeError, ValueError):
+                        continue
+
+        events.append(
+            AllocationEvent(
+                timestamp=row.timestamp.isoformat(),
+                allocations=AllocationEventWeightsResponse(allocations=parsed_allocations),
+            )
+        )
+
     return AllocationEventsResponse(events=events)

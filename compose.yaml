@@ -15,6 +15,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - hqg_network
 
   init-db:
     build:
@@ -35,6 +37,8 @@ services:
       DATABASE_URL: ${DATABASE_URL}
     command: python3 -m src.database
     restart: "no"
+    networks:
+      - hqg_network
 
   provider-api:
     build:
@@ -80,6 +84,8 @@ services:
       retries: 3
       start_period: 60s
     restart: unless-stopped
+    networks:
+      - hqg_network
 
   dashboard-api:
     build:
@@ -122,6 +128,8 @@ services:
       retries: 3
       start_period: 60s
     restart: unless-stopped
+    networks:
+      - hqg_network
 
   snapshot:
     build:
@@ -151,6 +159,8 @@ services:
       - ./src/config:/app/src/config:ro
     command: python3 -m src.snapshot_job
     restart: unless-stopped
+    networks:
+      - hqg_network
 
   engine:
     build:
@@ -185,6 +195,8 @@ services:
       - hqg_network
     command: python3 -m src.main
     restart: unless-stopped
+    networks:
+      - hqg_network
 
 networks:
   hqg_network:
@@ -192,3 +204,7 @@ networks:
 
 volumes:
   postgres_data:
+
+networks:
+  hqg_network:
+    external: true
