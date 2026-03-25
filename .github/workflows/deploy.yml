@@ -33,4 +33,5 @@ jobs:
         run: |
           curl -sf -X POST \
             -H "Authorization: Bearer ${{ secrets.DEPLOY_SECRET }}" \
-            https://platform.uconnquant.com/deploy/hqg-engine
+            https://platform.uconnquant.com/deploy/hqg-engine \
+            || { echo "Deploy trigger failed"; exit 1; }
