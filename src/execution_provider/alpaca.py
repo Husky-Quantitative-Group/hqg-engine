@@ -36,7 +36,7 @@ class AlpacaExecutor(Executor):
             raise
 
  
-    async def place_order(self, symbol: str, quantity: int, side: str) -> str:
+    async def place_order(self, symbol: str, quantity: float, side: str) -> str:
         """
         Place a market order
         Returns: Order ID
@@ -132,7 +132,7 @@ class AlpacaExecutor(Executor):
                     continue
                 
                 price = prices[symbol]
-                target_quantity = int(target_value / price)
+                target_quantity = target_value / price
                 current_quantity = current_positions.get(symbol, 0)
                 amount = target_quantity - current_quantity
                 
@@ -146,7 +146,7 @@ class AlpacaExecutor(Executor):
                 if symbol not in target_weights:
                     quantity = abs(current_positions[symbol])
                     if quantity > 0:
-                        orders_to_place.append((symbol, int(quantity), "SELL"))
+                        orders_to_place.append((symbol, quantity, "SELL"))
             
             # Separate sell and buy orders
             sell_orders = [(symbol, qty, side) for symbol, qty, side in orders_to_place if side == "SELL"]
@@ -185,7 +185,7 @@ class AlpacaExecutor(Executor):
             for symbol, quantity in positions.items():
                 side = "SELL" if quantity > 0 else "BUY"
                 logger.info(f"Liquidating {abs(quantity)} shares of {symbol} (side: {side})")
-                await self.place_order(symbol, int(abs(quantity)), side)
+                await self.place_order(symbol, abs(quantity), side)
                 await asyncio.sleep(0.1) # small delay between
             
             logger.info("Liquidation complete, all positions closed")
