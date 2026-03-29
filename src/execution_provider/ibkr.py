@@ -108,7 +108,7 @@ class IBKRExecutor(Executor):
                 continue # skip if no price data (?)
             
             price = prices[symbol]
-            target_quantity = int(target_value / price)
+            target_quantity = target_value / price
             
             current_quantity = current_positions.get(symbol, 0)
             amount = target_quantity - current_quantity
@@ -123,7 +123,7 @@ class IBKRExecutor(Executor):
             if symbol not in target_weights:
                 quantity = abs(current_positions[symbol])
                 if quantity > 0:
-                    orders_to_place.append((symbol, int(quantity), "SELL"))
+                    orders_to_place.append((symbol, quantity, "SELL"))
 
         sell_orders = [(symbol, qty, side) for symbol, qty, side in orders_to_place if side == "SELL"]
         buy_orders = [(symbol, qty, side) for symbol, qty, side in orders_to_place if side == "BUY"]
