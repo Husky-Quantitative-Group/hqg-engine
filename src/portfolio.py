@@ -110,7 +110,7 @@ class Portfolio:
 
         return Bar(open=o, high=h, low=l, close=close, volume=volume)
 
-    async def on_data(self, data):
+    async def on_data(self, data, portfolio_view: PortfolioView):
         strategy_results = []
 
         event_time = datetime.now(timezone.utc)
@@ -190,15 +190,9 @@ class Portfolio:
                         bars[sym] = bar
 
                 slice_obj = Slice(bars)
-                portfolio_obj = PortfolioView(  # TODO: Portfolio should be managing a PortfolioView, not passing in shell
-                    equity=0.0,
-                    cash=0.0,
-                    positions={},
-                    weights={}
-                )
 
                 try:
-                    allocations_dict = strategy_instance.on_data(slice_obj, portfolio_obj)
+                    allocations_dict = strategy_instance.on_data(slice_obj, portfolio_view)
                 except Exception as e:
                     logger.error(f"Strategy {strategy_id} failed: {e}", exc_info=True)
                     continue
