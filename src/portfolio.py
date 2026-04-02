@@ -2,9 +2,9 @@ from pathlib import Path
 import yaml
 import logging
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timezone
 
-from hqg_algorithms import Slice, PortfolioView
+from hqg_algorithms import Slice, PortfolioView, BarSize
 from src.aggregator import aggregate_allocations
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ class Portfolio:
         self.strategies = []
         self.strategy_configs = []
         self.config_path = config_path
-        self._strategy_state = {} # {strategy_id : {cadence=timedelta(), last_called=time.time(), last_output=[(ticker, weight)]} }
+        self._strategy_state = {}  # strategy_id -> { last_period, last_output }
         self.load_config()
         self.init_strategies()
         
@@ -83,44 +83,62 @@ class Portfolio:
         # only gets data in universe
         pass
 
-    def cadence_handler(self, strategy_id, cadence, current_time):
-        if strategy_id not in self._strategy_state:
-            self._strategy_state[strategy_id] = {
-                'cadence': cadence,
-                'last_called': None,
-                'last_output': []
-            }
-        
-        state = self._strategy_state[strategy_id]
-        last_called = state['last_called']
-        last_output = state['last_output']
-            
-        # check if cadence period has elapsed, or this is the first run
-        if last_called is None:
-            return CadenceDecision.RUN
-
-        next_call = last_called + (cadence.bar_size * cadence.exec_lag_bars)
-        if current_time >= next_call:
-            return CadenceDecision.RUN
-        
-        return CadenceDecision.PREV
-    
     async def on_data(self, data):
         strategy_results = []
-    
+
+        event_time = datetime.now(timezone.utc)
+        if data:
+            snapshot_timestamps = []
+            for s in data.values():
+                if isinstance(s, dict) and isinstance(s.get('timestamp'), datetime):
+                    snapshot_timestamps.append(s['timestamp'])
+            if snapshot_timestamps:
+                event_time = max(snapshot_timestamps)
+
         for strategy in self.strategies:
-            # call strategy_instance to get cadence & then keep those weights static if cadence has not elapsed
-            # ie, if decision is RUN and next_time > cur_time, append prev_weights to strategry_results so we maintain the position
-            
             strategy_id = strategy['id']
             strategy_instance = strategy['instance']
             aum_weight = strategy['weight']
-            universe = strategy['universe']
 
             cadence = strategy['cadence']
-            current_time = datetime.now()
-            decision = self.cadence_handler(strategy_id, cadence, current_time)
-            state = self._strategy_state[strategy_id]
+            state = self._strategy_state.setdefault(
+                strategy_id,
+                {'last_period': None, 'last_output': None},
+            )
+
+            utc = event_time
+            if utc.tzinfo is None:
+                utc = utc.replace(tzinfo=timezone.utc)
+            else:
+                utc = utc.astimezone(timezone.utc)
+
+            bs = cadence.bar_size
+            if bs == BarSize.DAILY:
+                period_now = utc.date().isoformat()
+
+            elif bs == BarSize.WEEKLY:
+                iso_year, iso_week, _iso_weekday = utc.isocalendar()
+                period_now = f"{iso_year}-W{iso_week:02d}"
+
+            elif bs == BarSize.MONTHLY:
+                period_now = f"{utc.year}-{utc.month:02d}"
+
+            elif bs == BarSize.QUARTERLY:
+                calendar_quarter = (utc.month - 1) // 3 + 1
+                period_now = f"{utc.year}-Q{calendar_quarter}"
+                
+            else:
+                period_now = utc.date().isoformat()
+                logger.warning(
+                    "Unknown BarSize %r for strategy %s",
+                    bs,
+                    strategy_id,
+                )
+
+            if state['last_period'] != period_now: # even on None (initial run), strategy should run
+                decision = CadenceDecision.RUN
+            else:
+                decision = CadenceDecision.PREV
 
             allocations_dict = None
 
@@ -141,12 +159,15 @@ class Portfolio:
                     logger.error(f"Strategy {strategy_id} failed: {e}", exc_info=True)
                     continue
 
+                if allocations_dict is None:
+                    logger.warning(f"Strategy {strategy_id} returned None allocations")
+                    continue
+
                 state['last_output'] = allocations_dict
-                state['last_called'] = current_time
-            
-            elif decision == CadenceDecision.PREV:  # PREV - use previous output (do not execute strategy)
+                state['last_period'] = period_now
+
+            elif decision == CadenceDecision.PREV:
                 allocations_dict = state['last_output']
-                state['last_called'] = current_time
     
             if allocations_dict is None:
                 logger.warning(f"Strategy {strategy_id} returned None allocations")
