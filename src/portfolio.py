@@ -58,13 +58,14 @@ class Portfolio:
             
             StrategyClass = strat_map[class_name]
             strategy_instance = StrategyClass()
-            universe = strategy_instance.universe()
-            
+            universe = list(StrategyClass.universe)
+
             self.strategies.append({
                 'id': strategy_id,
                 'instance': strategy_instance,
                 'weight': portfolio_weight,
-                'universe': universe
+                'universe': universe,
+                'cadence': StrategyClass.cadence,
             })
             
             logger.info(f"Initialized strategy: {strategy_id} ({class_name}) with weight {portfolio_weight:.2%}, universe: {universe}")
@@ -116,7 +117,7 @@ class Portfolio:
             aum_weight = strategy['weight']
             universe = strategy['universe']
 
-            cadence = strategy_instance.cadence()
+            cadence = strategy['cadence']
             current_time = datetime.now()
             decision = self.cadence_handler(strategy_id, cadence, current_time)
             state = self._strategy_state[strategy_id]
