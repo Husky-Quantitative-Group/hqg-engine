@@ -4,7 +4,7 @@ import logging
 from enum import Enum
 from datetime import datetime, timezone
 
-from hqg_algorithms import Slice, PortfolioView, BarSize
+from hqg_algorithms import Slice, PortfolioView, BarSize, Bar
 from src.aggregator import aggregate_allocations
 
 logger = logging.getLogger(__name__)
@@ -20,6 +20,7 @@ class Portfolio:
         self.strategy_configs = []
         self.config_path = config_path
         self._strategy_state = {}  # strategy_id -> { last_period, last_output }
+        self._last_bar_by_symbol = {} # str -> Bar
         self.load_config()
         self.init_strategies()
         
@@ -78,10 +79,36 @@ class Portfolio:
         logger.debug(f"Universe contains {len(all_tickers)} tickers: {sorted(all_tickers)}")
         return list(all_tickers)
     
-    def partition_data(universe, data) -> Slice:  #???
-        # TODO
-        # only gets data in universe
-        pass
+    def _create_bar(self, snapshot):
+        def _num(key: str):
+            v = snapshot.get(key)
+            if v is None:
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        close = _num("close")
+        price = _num("price")
+        volume = _num("volume")
+        
+        if close is None:
+            close = price
+            if close is None: # both close and price None
+                return None
+
+        o = _num("open")
+        h = _num("high")
+        l = _num("low")
+        if o is None:
+            o = close
+        if h is None:
+            h = close
+        if l is None:
+            l = close
+
+        return Bar(open=o, high=h, low=l, close=close, volume=volume)
 
     async def on_data(self, data):
         strategy_results = []
@@ -94,6 +121,14 @@ class Portfolio:
                     snapshot_timestamps.append(s['timestamp'])
             if snapshot_timestamps:
                 event_time = max(snapshot_timestamps)
+
+        if data:
+            for symbol, snapshot in data.items():
+                if not isinstance(snapshot, dict):
+                    continue
+                bar = self._create_bar(snapshot)
+                if bar is not None:
+                    self._last_bar_by_symbol[symbol] = bar
 
         for strategy in self.strategies:
             strategy_id = strategy['id']
@@ -143,9 +178,18 @@ class Portfolio:
             allocations_dict = None
 
             if decision == CadenceDecision.RUN:
-                # TODO send only data in universe
+                bars = {} # dict[str, Bar]
+                for sym in strategy['universe']:
+                    bar = None
+                    snapshot = data.get(sym) if data else None
+                    if isinstance(snapshot, dict):
+                        bar = self._create_bar(snapshot)
+                    if bar is None:
+                        bar = self._last_bar_by_symbol.get(sym)
+                    if bar is not None:
+                        bars[sym] = bar
 
-                slice_obj = Slice(data)
+                slice_obj = Slice(bars)
                 portfolio_obj = PortfolioView(  # TODO: Portfolio should be managing a PortfolioView, not passing in shell
                     equity=0.0,
                     cash=0.0,
