@@ -4,9 +4,8 @@ import logging
 from enum import Enum
 from datetime import datetime
 
-from hqg_algorithms import Slice, PortfolioView, Cadence
+from hqg_algorithms import Slice, PortfolioView
 from src.aggregator import aggregate_allocations
-from src.strategies import ClassicFinance_SPY_IEF, SMA_AAPL
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +45,7 @@ class Portfolio:
     
 
     def init_strategies(self):
-        strat_map = {
-            "ClassicFinance_SPY_IEF": ClassicFinance_SPY_IEF,
-            "SMA_AAPL": SMA_AAPL
-        }
+        strat_map = {}
         
         for config in self.strategy_configs:
             strategy_id = config['id']
