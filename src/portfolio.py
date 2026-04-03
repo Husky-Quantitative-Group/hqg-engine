@@ -3,7 +3,7 @@ import yaml
 import logging
 from datetime import datetime, timezone
 
-from hqg_algorithms import Slice, PortfolioView, BarSize, Bar
+from hqg_algorithms import Slice, PortfolioView, BarSize, Bar, TargetWeights, Hold, Liquidate
 from src.aggregator import aggregate_allocations
 
 logger = logging.getLogger(__name__)
@@ -215,15 +215,31 @@ class Portfolio:
 
                 slice_obj = Slice(bars)
                 strategy_failed = False
+                strategy_out = None
                 try:
-                    allocations_dict = strategy_instance.on_data(slice_obj, portfolio_view)
+                    strategy_out = strategy_instance.on_data(slice_obj, portfolio_view)
                 except Exception as e:
                     strategy_failed = True
                     logger.error(f"Strategy {strategy_id} failed: {e}", exc_info=True)
-                    allocations_dict = None
 
-                if not strategy_failed and allocations_dict is None:
-                    logger.warning(f"Strategy {strategy_id} returned None allocations")
+                allocations_dict = None
+                if not strategy_failed:
+                    if isinstance(strategy_out, TargetWeights):
+                        allocations_dict = dict(strategy_out.weights)
+                    elif isinstance(strategy_out, Hold):
+                        allocations_dict = state['last_output']
+                    elif isinstance(strategy_out, Liquidate):
+                        allocations_dict = {}
+                    elif isinstance(strategy_out, dict):
+                        allocations_dict = dict(strategy_out)
+                    elif strategy_out is None:
+                        allocations_dict = None
+                    else:
+                        logger.warning(
+                            "Strategy %s returned unexpected type %s",
+                            strategy_id,
+                            type(strategy_out).__name__,
+                        )
 
                 for sym in universe:
                     self._bar_aggregate.pop(
