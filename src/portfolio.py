@@ -1,7 +1,6 @@
 from pathlib import Path
 import yaml
 import logging
-from enum import Enum
 from datetime import datetime, timezone
 
 from hqg_algorithms import Slice, PortfolioView, BarSize, Bar
@@ -9,18 +8,14 @@ from src.aggregator import aggregate_allocations
 
 logger = logging.getLogger(__name__)
 
-class CadenceDecision(Enum):
-    RUN = "run"
-    PREV = "prev"
-    # WAIT = "wait"
 
 class Portfolio:
     def __init__(self, config_path="config/portfolio.yaml"):
         self.strategies = []
         self.strategy_configs = []
         self.config_path = config_path
-        self._strategy_state = {}  # strategy_id -> { last_period, last_output }
-        self._last_bar_by_symbol = {} # str -> Bar
+        self._strategy_state = {}  # strategy_id -> { current_bar_period, last_output }
+        self._bar_aggregate: dict[tuple, dict] = {} # aggregate OHLCV period data for each symbol (for each strategy)
         self.load_config()
         self.init_strategies()
         
@@ -122,24 +117,14 @@ class Portfolio:
             if snapshot_timestamps:
                 event_time = max(snapshot_timestamps)
 
-        if data:
-            for symbol, snapshot in data.items():
-                if not isinstance(snapshot, dict):
-                    continue
-                bar = self._create_bar(snapshot)
-                if bar is not None:
-                    self._last_bar_by_symbol[symbol] = bar
-
         for strategy in self.strategies:
             strategy_id = strategy['id']
             strategy_instance = strategy['instance']
             aum_weight = strategy['weight']
-
+            universe = strategy['universe']
             cadence = strategy['cadence']
-            state = self._strategy_state.setdefault(
-                strategy_id,
-                {'last_period': None, 'last_output': None},
-            )
+            bar_size = cadence.bar_size
+            state = self._strategy_state.setdefault(strategy_id, {'current_bar_period': None, 'last_output': None})
 
             utc = event_time
             if utc.tzinfo is None:
@@ -147,70 +132,149 @@ class Portfolio:
             else:
                 utc = utc.astimezone(timezone.utc)
 
-            bs = cadence.bar_size
-            if bs == BarSize.DAILY:
-                period_now = utc.date().isoformat()
+            if bar_size == BarSize.DAILY:
+                tick_bar_period = utc.date().isoformat()
 
-            elif bs == BarSize.WEEKLY:
+            elif bar_size == BarSize.WEEKLY:
                 iso_year, iso_week, _iso_weekday = utc.isocalendar()
-                period_now = f"{iso_year}-W{iso_week:02d}"
+                tick_bar_period = f"{iso_year}-W{iso_week:02d}"
 
-            elif bs == BarSize.MONTHLY:
-                period_now = f"{utc.year}-{utc.month:02d}"
+            elif bar_size == BarSize.MONTHLY:
+                tick_bar_period = f"{utc.year}-{utc.month:02d}"
 
-            elif bs == BarSize.QUARTERLY:
+            elif bar_size == BarSize.QUARTERLY:
                 calendar_quarter = (utc.month - 1) // 3 + 1
-                period_now = f"{utc.year}-Q{calendar_quarter}"
-                
+                tick_bar_period = f"{utc.year}-Q{calendar_quarter}"
+
             else:
-                period_now = utc.date().isoformat()
+                tick_bar_period = utc.date().isoformat()
                 logger.warning(
                     "Unknown BarSize %r for strategy %s",
-                    bs,
+                    bar_size,
                     strategy_id,
                 )
 
-            if state['last_period'] != period_now: # even on None (initial run), strategy should run
-                decision = CadenceDecision.RUN
-            else:
-                decision = CadenceDecision.PREV
-
             allocations_dict = None
 
-            if decision == CadenceDecision.RUN:
-                bars = {} # dict[str, Bar]
-                for sym in strategy['universe']:
-                    bar = None
-                    snapshot = data.get(sym) if data else None
-                    if isinstance(snapshot, dict):
-                        bar = self._create_bar(snapshot)
-                    if bar is None:
-                        bar = self._last_bar_by_symbol.get(sym)
-                    if bar is not None:
-                        bars[sym] = bar
+            if state['current_bar_period'] is None:
+                state['current_bar_period'] = tick_bar_period
+
+            if tick_bar_period == state['current_bar_period']:
+                if data:
+                    for sym in universe:
+                        snap = data.get(sym)
+                        if not isinstance(snap, dict):
+                            continue
+
+                        tick = self._create_bar(snap)
+                        if tick is None:
+                            continue
+
+                        key = (strategy_id, bar_size, tick_bar_period, sym)
+                        if key not in self._bar_aggregate:
+                            self._bar_aggregate[key] = {
+                                "open": None,
+                                "high": None,
+                                "low": None,
+                                "close": None,
+                                "volume": None,
+                            }
+
+                        acc = self._bar_aggregate[key]
+                        if acc["open"] is None:
+                            acc["open"] = tick.open
+                            acc["high"] = tick.high
+                            acc["low"] = tick.low
+                            acc["close"] = tick.close
+                            acc["volume"] = tick.volume
+
+                        else:
+                            acc["high"] = max(acc["high"], tick.high)
+                            acc["low"] = min(acc["low"], tick.low)
+                            acc["close"] = tick.close
+                            if tick.volume is not None:
+                                acc["volume"] = (acc["volume"] or 0.0) + tick.volume
+
+                allocations_dict = state['last_output']
+
+            else: # new period; close bar, and move on
+                completed_bar_period = state['current_bar_period']
+                bars: dict[str, Bar] = {}
+                for sym in universe:
+                    acc = self._bar_aggregate.get((strategy_id, bar_size, completed_bar_period, sym))
+                    if acc is None or acc["open"] is None or acc["close"] is None:
+                        continue
+                    
+                    bars[sym] = Bar(
+                        open=acc["open"],
+                        high=acc["high"],
+                        low=acc["low"],
+                        close=acc["close"],
+                        volume=acc["volume"],
+                    )
 
                 slice_obj = Slice(bars)
-
+                strategy_failed = False
                 try:
                     allocations_dict = strategy_instance.on_data(slice_obj, portfolio_view)
                 except Exception as e:
+                    strategy_failed = True
                     logger.error(f"Strategy {strategy_id} failed: {e}", exc_info=True)
-                    continue
+                    allocations_dict = None
 
-                if allocations_dict is None:
+                if not strategy_failed and allocations_dict is None:
                     logger.warning(f"Strategy {strategy_id} returned None allocations")
+
+                for sym in universe:
+                    self._bar_aggregate.pop(
+                        (strategy_id, bar_size, completed_bar_period, sym), None
+                    )
+
+                state['current_bar_period'] = tick_bar_period
+                if data:
+                    for sym in universe:
+                        snap = data.get(sym)
+                        if not isinstance(snap, dict):
+                            continue
+                        
+                        tick = self._create_bar(snap)
+                        if tick is None:
+                            continue
+
+                        key = (strategy_id, bar_size, tick_bar_period, sym)
+                        if key not in self._bar_aggregate:
+                            self._bar_aggregate[key] = {
+                                "open": None,
+                                "high": None,
+                                "low": None,
+                                "close": None,
+                                "volume": None,
+                            }
+
+                        acc = self._bar_aggregate[key]
+                        if acc["open"] is None:
+                            acc["open"] = tick.open
+                            acc["high"] = tick.high
+                            acc["low"] = tick.low
+                            acc["close"] = tick.close
+                            acc["volume"] = tick.volume
+
+                        else:
+                            acc["high"] = max(acc["high"], tick.high)
+                            acc["low"] = min(acc["low"], tick.low)
+                            acc["close"] = tick.close
+                            if tick.volume is not None:
+                                acc["volume"] = (acc["volume"] or 0.0) + tick.volume
+
+                if allocations_dict is not None:
+                    state['last_output'] = allocations_dict
+                else:
                     continue
 
-                state['last_output'] = allocations_dict
-                state['last_period'] = period_now
-
-            elif decision == CadenceDecision.PREV:
-                allocations_dict = state['last_output']
-    
             if allocations_dict is None:
                 logger.warning(f"Strategy {strategy_id} returned None allocations")
                 continue
-            
+
             allocations = list(allocations_dict.items())
             strategy_results.append((strategy_id, allocations, aum_weight))
             logger.info(f"Strategy {strategy_id} allocations: {allocations}")
