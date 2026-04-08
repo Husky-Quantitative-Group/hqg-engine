@@ -3,6 +3,8 @@ import logging
 from datetime import datetime
 from math import trunc
 
+from hqg_algorithms import PortfolioView
+
 from src.portfolio import Portfolio
 from src.database import async_session
 from src.db.models import (Portfolio as PortfolioDB, AllocationEvent as AllocationEventDB, ExecutionEvent as ExecutionEventDB, Action)
@@ -13,6 +15,51 @@ logger = logging.getLogger(__name__)
 
 def truncate(value: float) -> float:
     return trunc(float(value) * 1000) / 1000
+
+
+def build_portfolio_view(equity, positions, market_data):
+    for k in list(positions.keys()):
+        positions[k] = float(positions[k])
+    
+    if equity <= 0:
+        return PortfolioView(
+            equity=float(equity),
+            cash=0.0,
+            positions=positions,
+            weights={},
+        )
+
+    holdings_value = 0.0
+    weights: dict[str, float] = {}
+
+    for symbol, qty in positions.items():
+        reference_price = None
+        snapshot = market_data.get(symbol)
+        if isinstance(snapshot, dict):
+            for key in ("close", "price"):
+                v = snapshot.get(key)
+                if v is None:
+                    continue
+                try:
+                    reference_price = float(v)
+                    break
+                except (TypeError, ValueError):
+                    continue
+
+        if reference_price is None:
+            continue
+
+        position_value = qty * reference_price
+        holdings_value += position_value
+        weights[symbol] = position_value / equity
+
+    cash = max(float(equity) - holdings_value, 0.0)
+    return PortfolioView(
+        equity=float(equity),
+        cash=cash,
+        positions=positions,
+        weights=weights,
+    )
 
 def setup_logging():
     logging.basicConfig(
@@ -33,6 +80,7 @@ async def run():
         
         market_data = {}
         ticker_set = set(universe)
+        last_portfolio_view: PortfolioView | None = None
 
         async for snapshot in provider_client.stream_prices(universe):
             if snapshot is not None:
@@ -52,20 +100,28 @@ async def run():
                         logger.info("Portfolio is inactive, skipping trading cycle")
                         continue
                     else:
-                        # Get target weights from portfolio
-                        target_weights = await portfolio.on_data(market_data)
-
-                        # Get current account value
-                        portfolio_value = await provider_client.get_account_value()
-                        logger.info(f"Current account value: ${portfolio_value:,.2f}")
-
+                        equity = await provider_client.get_account_value()
                         pos_before = await provider_client.get_positions()
+                        portfolio_view = build_portfolio_view(equity, pos_before, market_data)
+                        target_weights = await portfolio.on_data(market_data, portfolio_view)
+
+                        portfolio_value = portfolio_view.equity
+                        logger.info(f"Current account value: ${portfolio_value:,.2f}")
 
                         # Execute rebalancing
                         logger.info(f"Rebalancing with target weights:{target_weights}")
                         await provider_client.rebalance(target_weights, portfolio_value, market_data)
 
                         pos_after = await provider_client.get_positions()
+                        equity_after = await provider_client.get_account_value()
+                        last_portfolio_view = build_portfolio_view(equity_after, pos_after, market_data)
+
+                        logger.debug(
+                            "Post-rebalance portfolio view: equity=%s cash=%s",
+                            last_portfolio_view.equity,
+                            last_portfolio_view.cash,
+                        )
+
                         execution_events = []
                         symbols = set(pos_before.keys()) | set(pos_after.keys())
 
