@@ -124,16 +124,18 @@ class PortfolioRequest(BaseModel):
     portfolio_id: int
     name: str
     is_active: bool
+    live: bool
 
 class PortfolioResponse(BaseModel):
     """Expected data model for portfolio endpoint"""
     portfolio_id: int
     name: str
     is_active: bool
+    live: bool
 
 @router.post("/portfolio", response_model=PortfolioResponse)
 async def create_portfolio(portfolio: PortfolioRequest, session: AsyncSession = Depends(get_session)):
-    new_portfolio = Portfolio(name=portfolio.name, is_active=portfolio.is_active)
+    new_portfolio = Portfolio(name=portfolio.name, is_active=portfolio.is_active, live=portfolio.live)
 
     session.add(new_portfolio)
     await session.commit()
@@ -142,7 +144,8 @@ async def create_portfolio(portfolio: PortfolioRequest, session: AsyncSession = 
     return PortfolioResponse(
         portfolio_id=new_portfolio.portfolio_id,
         name=new_portfolio.name,
-        is_active=new_portfolio.is_active
+        is_active=new_portfolio.is_active,
+        live=new_portfolio.live,
     )
 
 @router.post("/portfolio/{id}/stop", response_model=TradeResponse)

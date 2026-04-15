@@ -1,12 +1,38 @@
 from pathlib import Path
+import importlib
 import yaml
 import logging
 from datetime import datetime, timezone
 
-from hqg_algorithms import Slice, PortfolioView, BarSize, Bar, TargetWeights, Hold, Liquidate
+from hqg_algorithms import Slice, PortfolioView, Cadence, Strategy,BarSize, Bar, TargetWeights, Hold, Liquidate
 from src.aggregator import aggregate_allocations
 
 logger = logging.getLogger(__name__)
+
+
+def _get_strategies(class_name):
+    try:
+        module = importlib.import_module(f"src.strategies.{class_name}")
+
+    except ModuleNotFoundError:
+        raise ValueError(
+            f"No module found for strategy '{class_name}'. "
+            f"Expected file: src/strategies/{class_name}.py"
+        )
+
+    cls = getattr(module, class_name, None)
+    
+    if cls is None:
+        raise ValueError(
+            f"Module 'src.strategies.{class_name}' has no class '{class_name}'"
+        )
+
+    if not issubclass(cls, Strategy):
+        raise TypeError(
+            f"'{class_name}' is not a subclass of Strategy"
+        )
+
+    return cls
 
 
 class Portfolio:
@@ -48,11 +74,7 @@ class Portfolio:
             class_name = config['class_name']
             portfolio_weight = config['portfolio_weight']
 
-            if class_name not in strat_map:
-                logger.error(f"Unknown strategy class: {class_name}")
-                raise ValueError(f"Unknown strategy class: {class_name}")
-            
-            StrategyClass = strat_map[class_name]
+            StrategyClass = _get_strategies(class_name)
             strategy_instance = StrategyClass()
             universe = list(StrategyClass.universe)
 

@@ -15,6 +15,7 @@ class Portfolio(Base):
     portfolio_id = Column(BigInteger, Identity(always=True), primary_key=True)
     name = Column(String(255))
     is_active = Column(Boolean, default=True, nullable=False)
+    live = Column(Boolean, nullable=False)
 
 class Instrument(Base):
     __tablename__ = "instruments"

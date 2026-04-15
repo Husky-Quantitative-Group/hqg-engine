@@ -183,20 +183,9 @@ async def run():
 
 async def main():
     setup_logging()
-    
-    # create portfolio if it doesn't exist
-    async with async_session() as session:
-        result = await session.execute(select(PortfolioDB).where(PortfolioDB.portfolio_id == 1))
-        db_portfolio = result.scalar_one_or_none()
-        
-        if db_portfolio is None:
-            logger.info("Default portfolio not found, creating portfolio with id=1")
-            new_portfolio = PortfolioDB(name="Husky Portfolio", is_active=True)
-            session.add(new_portfolio)
-            await session.commit()
-            await session.refresh(new_portfolio)
-            logger.info(f"Created portfolio: ID={new_portfolio.portfolio_id}, name='{new_portfolio.name}', is_active={new_portfolio.is_active}")
-    
+
+    # TODO: Issue #33; thus, do not need auto-init.
+
     try:
         await run()
     except Exception as e:
