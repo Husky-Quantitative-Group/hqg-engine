@@ -65,6 +65,7 @@ def test_get_session_rolls_back_and_reraises(monkeypatch):
 def test_init_db_creates_metadata(monkeypatch, capsys):
     connection = Mock()
     connection.run_sync = AsyncMock()
+    connection.execute = AsyncMock()
 
     @asynccontextmanager
     async def begin():

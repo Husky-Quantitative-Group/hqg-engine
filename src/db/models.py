@@ -1,5 +1,5 @@
 from sqlalchemy.orm import declarative_base, relationship
-from sqlalchemy import Column, BigInteger, Identity, String, DateTime, Boolean, Date, Numeric,PrimaryKeyConstraint, ForeignKey, CheckConstraint, JSON
+from sqlalchemy import Column, BigInteger, Identity, String, DateTime, Boolean, Date, Numeric,PrimaryKeyConstraint, ForeignKey, CheckConstraint, UniqueConstraint, JSON
 from enum import Enum
 from sqlalchemy.dialects.postgresql import ENUM as PgEnum
 
@@ -14,7 +14,15 @@ class Portfolio(Base):
     
     portfolio_id = Column(BigInteger, Identity(always=True), primary_key=True)
     name = Column(String(255))
-    is_active = Column(Boolean, default=True, nullable=False)
+    is_active = Column(Boolean, default=False, nullable=False)
+    account_id = Column(String(36))
+    mode = Column(String(5))
+    dashboard_uuid = Column(String(36))
+    __table_args__ = (
+        UniqueConstraint("account_id", "mode", name="portfolios_account_mode"),
+        UniqueConstraint("dashboard_uuid", name="portfolios_dashboard_uuid"),
+        CheckConstraint("mode IS NULL OR mode IN ('paper', 'live')"),
+    )
 
 class Instrument(Base):
     __tablename__ = "instruments"
@@ -80,3 +88,17 @@ class AllocationEvent(Base):
     portfolio_id = Column(BigInteger, nullable=False)
     timestamp = Column(DateTime, nullable=False)
     allocations = Column(JSON, nullable=False) # [{"symbol": "TSLA", "weight": 0.6}, ...]
+
+class ControlRuntime(Base):
+    __tablename__ = "control_runtime"
+    account_id = Column(String(36), primary_key=True)
+    state = Column(JSON, nullable=False)
+
+
+class BrokerOrder(Base):
+    __tablename__ = "broker_orders"
+    client_order_id = Column(String(48), primary_key=True)
+    account_id = Column(String(36), nullable=False)
+    mode = Column(String(5), nullable=False)
+    details = Column(JSON, nullable=False)
+    __table_args__ = (CheckConstraint("mode IN ('paper', 'live')"),)
