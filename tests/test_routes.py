@@ -88,74 +88,22 @@ def test_get_portfolio_raises_404_when_missing():
     assert exc_info.value.detail == "Portfolio 404 not found"
 
 
-def test_create_portfolio_persists_and_returns_created_model():
+@pytest.mark.parametrize("endpoint", [routes.stop_trading, routes.resume_trading, routes.liquidate_all])
+def test_legacy_mutations_are_disabled(endpoint):
     session = make_session()
-
-    async def refresh(portfolio):
-        portfolio.portfolio_id = 12
-
-    session.refresh.side_effect = refresh
-    request = routes.PortfolioRequest(portfolio_id=999, name="Income", is_active=False)
-
-    response = run(routes.create_portfolio(request, session))
-
-    added = session.add.call_args.args[0]
-    assert added.name == "Income"
-    assert added.is_active is False
-    session.commit.assert_awaited_once_with()
-    session.refresh.assert_awaited_once_with(added)
-    assert response == routes.PortfolioResponse(
-        portfolio_id=12, name="Income", is_active=False
-    )
+    with pytest.raises(HTTPException) as exc:
+        run(endpoint(3, session))
+    assert exc.value.status_code == 410
+    session.execute.assert_not_awaited()
+    session.commit.assert_not_awaited()
 
 
-@pytest.mark.parametrize(
-    ("endpoint", "active", "message"),
-    [
-        (routes.stop_trading, False, "Trading stopped successfully"),
-        (routes.resume_trading, True, "Trading resumed successfully"),
-    ],
-)
-def test_trading_state_endpoints_update_portfolio(endpoint, active, message):
-    portfolio = SimpleNamespace(portfolio_id=3, is_active=not active)
-    session = make_session(Result(scalar=portfolio))
-
-    response = run(endpoint(3, session))
-
-    assert portfolio.is_active is active
-    session.commit.assert_awaited_once_with()
-    assert response == routes.TradeResponse(success=True, message=message)
-
-
-def test_liquidate_stops_trading_after_provider_succeeds(monkeypatch):
-    portfolio = SimpleNamespace(portfolio_id=3, is_active=True)
-    session = make_session(Result(scalar=portfolio))
-    liquidate = AsyncMock()
-    monkeypatch.setattr(routes.provider_client, "liquidate", liquidate)
-
-    response = run(routes.liquidate_all(3, session))
-
-    liquidate.assert_awaited_once_with()
-    assert portfolio.is_active is False
-    session.commit.assert_awaited_once_with()
-    assert response.success is True
-
-
-def test_liquidate_rolls_back_and_returns_500_on_provider_error(monkeypatch):
-    portfolio = SimpleNamespace(portfolio_id=3, is_active=True)
-    session = make_session(Result(scalar=portfolio))
-    monkeypatch.setattr(
-        routes.provider_client,
-        "liquidate",
-        AsyncMock(side_effect=RuntimeError("broker unavailable")),
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        run(routes.liquidate_all(3, session))
-
-    session.rollback.assert_awaited_once_with()
-    assert exc_info.value.status_code == 500
-    assert exc_info.value.detail == "Error during liquidation: broker unavailable"
+def test_legacy_portfolio_creation_is_disabled():
+    session = make_session()
+    with pytest.raises(HTTPException) as exc:
+        run(routes.create_portfolio(routes.PortfolioRequest(portfolio_id=3, name="test", is_active=True), session))
+    assert exc.value.status_code == 410
+    session.commit.assert_not_awaited()
 
 
 def test_get_equity_serializes_snapshots_in_query_order():

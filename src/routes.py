@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Literal
 import statistics
 import logging
 from fastapi import APIRouter, HTTPException, Depends
@@ -8,7 +8,6 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_session
-from src.provider_instance.client import provider_client
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +62,19 @@ class EquityPoint(BaseModel):
     timestamp: str
     equity_value: float
 
-class EquityResponse(BaseModel):
+class PortfolioContext(BaseModel):
+    account_id: Optional[str] = None
+    mode: Optional[Literal["paper", "live"]] = None
+    portfolio_uuid: Optional[str] = None
+
+
+def portfolio_context(portfolio):
+    return {"account_id": getattr(portfolio, "account_id", None),
+            "mode": getattr(portfolio, "mode", None),
+            "portfolio_uuid": getattr(portfolio, "dashboard_uuid", None)}
+
+
+class EquityResponse(PortfolioContext):
     """Expected data model for equity curve endpoint"""
     data: List[EquityPoint]
 
@@ -75,23 +86,23 @@ class SnapshotData(BaseModel):
     return_pct: float
     as_of: str
 
-class SnapshotResponse(BaseModel):
+class SnapshotResponse(PortfolioContext):
     """Expected data model for portfolio snapshot endpoint"""
     snapshots: List[SnapshotData] # will return up to 3 most recent snapshots
 
-class MetricsResponse(BaseModel):
+class MetricsResponse(PortfolioContext):
     """Expected data model for portfolio metrics"""
     # TODO: Define structure for performance metrics 
     # Expected: Dict of metric_name -> value (Sharpe, Sortino, CAGR, max_drawdown, alpha, beta, std)
     metrics: Dict[str, float]
 
-class StrategyAllocationsResponse(BaseModel):
+class StrategyAllocationsResponse(PortfolioContext):
     """Expected data model for strategy allocations"""
     # TODO: Define structure for allocations by strategy
     # Expected: Dict of strategy_id -> allocation mapping
     allocations: Dict[str, float]
 
-class AssetAllocationsResponse(BaseModel):
+class AssetAllocationsResponse(PortfolioContext):
     """Expected data model for asset allocations"""
     # Returns actual holdings: {symbol: {"quantity": float, "market_value": float}}
     allocations: Dict[str, Dict[str, float]]
@@ -107,7 +118,7 @@ class ExecutionEvent(BaseModel):
     quantity: float
     timestamp: str
 
-class ExecutionEventsResponse(BaseModel):
+class ExecutionEventsResponse(PortfolioContext):
     """Expected data model for execution event endpoint"""
     events: List[ExecutionEvent]
 
@@ -116,7 +127,7 @@ class AllocationEvent(BaseModel):
     timestamp: str
     allocations: AllocationEventWeightsResponse
 
-class AllocationEventsResponse(BaseModel):
+class AllocationEventsResponse(PortfolioContext):
     """Expected data model for allocation events endpoint"""
     events: List[AllocationEvent]
 
@@ -133,66 +144,27 @@ class PortfolioResponse(BaseModel):
 
 @router.post("/portfolio", response_model=PortfolioResponse)
 async def create_portfolio(portfolio: PortfolioRequest, session: AsyncSession = Depends(get_session)):
-    new_portfolio = Portfolio(name=portfolio.name, is_active=portfolio.is_active)
+    raise HTTPException(status_code=410, detail="Configure portfolios through dashboard account control")
 
-    session.add(new_portfolio)
-    await session.commit()
-    await session.refresh(new_portfolio)
-    
-    return PortfolioResponse(
-        portfolio_id=new_portfolio.portfolio_id,
-        name=new_portfolio.name,
-        is_active=new_portfolio.is_active
-    )
 
 @router.post("/portfolio/{id}/stop", response_model=TradeResponse)
 async def stop_trading(id: int, session: AsyncSession = Depends(get_session)):
-    portfolio = await get_portfolio(id, session)
-    
-    portfolio.is_active = False
-    await session.commit()
-    
-    return TradeResponse(
-        success=True,
-        message="Trading stopped successfully"
-    )
+    raise HTTPException(status_code=410, detail="Use dashboard account Stop")
+
 
 @router.post("/portfolio/{id}/resume", response_model=TradeResponse)
 async def resume_trading(id: int, session: AsyncSession = Depends(get_session)):
-    portfolio = await get_portfolio(id, session)
-    
-    portfolio.is_active = True
-    await session.commit()
-    
-    return TradeResponse(
-        success=True,
-        message="Trading resumed successfully"
-    )
+    raise HTTPException(status_code=410, detail="Use dashboard incident-bound Resume")
+
 
 @router.post("/portfolio/{id}/liquidate", response_model=TradeResponse)
 async def liquidate_all(id: int, session: AsyncSession = Depends(get_session)):
-    portfolio = await get_portfolio(id, session)
+    raise HTTPException(status_code=410, detail="Liquidation is outside the current MVP-POC")
 
-    try:
-        logger.info(f"Liquidating portfolio {id}")
-        await provider_client.liquidate()
-        
-        portfolio.is_active = False
-        await session.commit()
-        
-        return TradeResponse(
-            success=True,
-            message=f"Liquidation completed. All positions sold and trading stopped."
-        )
-
-    except Exception as e:
-        await session.rollback()
-        logger.error(f"Error during liquidation for portfolio {id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Error during liquidation: {str(e)}")
 
 @router.get("/portfolio/{id}/equity", response_model=EquityResponse)
 async def get_equity(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
-    await get_portfolio(id, session)
+    portfolio = await get_portfolio(id, session)
     query = select(PerformanceSnapshot).where(PerformanceSnapshot.portfolio_id == id)
 
     start_date = timeframe_to_date_range(timeframe)
@@ -212,12 +184,12 @@ async def get_equity(id: int, timeframe: Optional[Timeframe] = None, session: As
         ) for snapshot in snapshots
     ]
     
-    return EquityResponse(data=equity_points)
+    return EquityResponse(**portfolio_context(portfolio), data=equity_points)
 
 @router.get("/portfolio/{id}/snapshot", response_model=SnapshotResponse)
 async def get_snapshot(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
     """get main portfolio metrics (equity, capital, net profit, return %)"""
-    await get_portfolio(id, session)
+    portfolio = await get_portfolio(id, session)
     query = select(PerformanceSnapshot).where(PerformanceSnapshot.portfolio_id == id)
 
     start_date = timeframe_to_date_range(timeframe)
@@ -272,12 +244,12 @@ async def get_snapshot(id: int, timeframe: Optional[Timeframe] = None, session: 
             as_of=snapshot_date.isoformat()
         ))
 
-    return SnapshotResponse(snapshots=snapshot_data_list)
+    return SnapshotResponse(**portfolio_context(portfolio), snapshots=snapshot_data_list)
 
 @router.get("/portfolio/{id}/metrics", response_model=MetricsResponse)
 async def get_metrics(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
     """get other performance metrics (sharpe, sortino, CAGR, max drawdown, alpha, beta, std)"""
-    await get_portfolio(id, session)
+    portfolio = await get_portfolio(id, session)
     
     # get performance snapshots (within timeframe)
     query = select(PerformanceSnapshot).where(PerformanceSnapshot.portfolio_id == id)
@@ -289,7 +261,7 @@ async def get_metrics(id: int, timeframe: Optional[Timeframe] = None, session: A
     snapshots = result.scalars().all()
     
     if len(snapshots) < 2: # need at least 2 data points
-        return MetricsResponse(metrics={"sharpe": 0.0, "sortino": 0.0, "cagr": 0.0, "max_drawdown": 0.0, "alpha": 0.0, "beta": 0.0, "std": 0.0})
+        return MetricsResponse(**portfolio_context(portfolio), metrics={"sharpe": 0.0, "sortino": 0.0, "cagr": 0.0, "max_drawdown": 0.0, "alpha": 0.0, "beta": 0.0, "std": 0.0})
     
     # equity values and dates
     equity_values = [float(snapshot.equity) for snapshot in snapshots]
@@ -334,7 +306,7 @@ async def get_metrics(id: int, timeframe: Optional[Timeframe] = None, session: A
     alpha = 0.0 # similar to sharpe, should we store a benchmark rate in db?
     beta = 0.0 # ... also
     
-    return MetricsResponse(metrics={
+    return MetricsResponse(**portfolio_context(portfolio), metrics={
         "sharpe": sharpe,
         "sortino": sortino,
         "cagr": cagr,
@@ -347,7 +319,7 @@ async def get_metrics(id: int, timeframe: Optional[Timeframe] = None, session: A
 @router.get("/portfolio/{id}/allocations/strategies", response_model=StrategyAllocationsResponse)
 async def get_strategy_allocations(id: int, session: AsyncSession = Depends(get_session)):
     """get allocations grouped by strategy name"""
-    await get_portfolio(id, session)
+    portfolio = await get_portfolio(id, session)
     
     # get most recent snapshot date
     query = select(StrategyWeightsSnapshot).where(StrategyWeightsSnapshot.portfolio_id == id)
@@ -356,18 +328,18 @@ async def get_strategy_allocations(id: int, session: AsyncSession = Depends(get_
     snapshots = result.scalars().all()
     
     if not snapshots:
-        return StrategyAllocationsResponse(allocations={})
+        return StrategyAllocationsResponse(**portfolio_context(portfolio), allocations={})
     
     # get most recent & filter to only those snapshots
     most_recent = snapshots[0].as_of
     weights = [snapshot for snapshot in snapshots if snapshot.as_of == most_recent]
     
     allocations = {snapshot.strategy_name : float(snapshot.weight) for snapshot in weights}
-    return StrategyAllocationsResponse(allocations=allocations)
+    return StrategyAllocationsResponse(**portfolio_context(portfolio), allocations=allocations)
 
 @router.get("/portfolio/{id}/allocations/assets", response_model=AssetAllocationsResponse)
 async def get_asset_allocations(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
-    await get_portfolio(id, session)
+    portfolio = await get_portfolio(id, session)
     start_date = timeframe_to_date_range(timeframe)
     snapshot_query = select(PerformanceSnapshot).where(PerformanceSnapshot.portfolio_id == id)
     
@@ -379,7 +351,7 @@ async def get_asset_allocations(id: int, timeframe: Optional[Timeframe] = None, 
     most_recent_snapshot = snapshot_result.scalars().first()
     
     if most_recent_snapshot is None:
-        return AssetAllocationsResponse(allocations={})
+        return AssetAllocationsResponse(**portfolio_context(portfolio), allocations={})
     
     holdings_query = select(HoldingsSnapshot, Instrument.ticker).join(
         Instrument, HoldingsSnapshot.instrument_id == Instrument.instrument_id
@@ -399,13 +371,13 @@ async def get_asset_allocations(id: int, timeframe: Optional[Timeframe] = None, 
         for holding, ticker in holdings
     }
     
-    return AssetAllocationsResponse(allocations=allocations)
+    return AssetAllocationsResponse(**portfolio_context(portfolio), allocations=allocations)
 
 @router.get("/portfolio/{id}/events/executions", response_model=ExecutionEventsResponse)
 async def get_execution_events(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
     """get list of execution events"""
     # TODO: Return list of execution events (orders placed, trades executed)
-    await get_portfolio(id, session)
+    portfolio = await get_portfolio(id, session)
 
     query = select(ExecutionEventDB).where(ExecutionEventDB.portfolio_id == id)
     start_date = timeframe_to_date_range(timeframe)
@@ -416,7 +388,7 @@ async def get_execution_events(id: int, timeframe: Optional[Timeframe] = None, s
     execution_events = result.scalars().all()
 
     if execution_events is None:
-        return ExecutionEventsResponse(events=[])
+        return ExecutionEventsResponse(**portfolio_context(portfolio), events=[])
     
     events = [
         ExecutionEvent(
@@ -426,12 +398,12 @@ async def get_execution_events(id: int, timeframe: Optional[Timeframe] = None, s
             timestamp=execution_event.timestamp.isoformat()
         ) for execution_event in execution_events
     ]
-    return ExecutionEventsResponse(events=events)
+    return ExecutionEventsResponse(**portfolio_context(portfolio), events=events)
 
 @router.get("/portfolio/{id}/events/allocations", response_model=AllocationEventsResponse)
 async def get_allocation_events(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
     """get list of rebalance events"""
-    await get_portfolio(id, session)
+    portfolio = await get_portfolio(id, session)
 
     query = select(AllocationEventDB).where(AllocationEventDB.portfolio_id == id)
     start_date = timeframe_to_date_range(timeframe)
@@ -443,7 +415,7 @@ async def get_allocation_events(id: int, timeframe: Optional[Timeframe] = None, 
     rows = result.scalars().all()
 
     if not rows:
-        return AllocationEventsResponse(events=[])
+        return AllocationEventsResponse(**portfolio_context(portfolio), events=[])
     
     events = []
     for row in rows:
@@ -480,4 +452,4 @@ async def get_allocation_events(id: int, timeframe: Optional[Timeframe] = None, 
             )
         )
 
-    return AllocationEventsResponse(events=events)
+    return AllocationEventsResponse(**portfolio_context(portfolio), events=events)
