@@ -1,0 +1,2 @@
+-r requirements.txt
+moto[dynamodb]==5.2.2
