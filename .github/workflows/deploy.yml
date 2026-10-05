@@ -12,14 +12,34 @@ jobs:
   test:
     name: Run Tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: mvp
+          POSTGRES_PASSWORD: FAKE-db-password
+          POSTGRES_DB: mvp
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U mvp -d mvp" --health-interval 1s --health-retries 30
+    defaults:
+      run:
+        working-directory: hqg-engine
+    env:
+      MVP_TEST_DATABASE_URL: postgresql+asyncpg://mvp:FAKE-db-password@127.0.0.1:5432/mvp
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: hqg-engine
+      - uses: actions/checkout@v4
+        with:
+          repository: Husky-Quantitative-Group/hqg-dashboard
+          path: hqg-dashboard
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-test.txt
       - name: Run tests
         run: pytest
 
