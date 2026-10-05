@@ -1,0 +1,85 @@
+# Standalone mock stack. Trading services have no external network route.
+x-engine: &engine
+  build: .
+  image: ${MVP_ENGINE_IMAGE:-hqg-engine-mock}
+  volumes:
+    - ./src:/app/src:ro
+    - ./local:/app/local:ro
+  networks: [mock]
+x-environment: &environment
+  BROKER_TRANSPORT: mock
+  HQG_ACCOUNT_ID: 00000000-0000-4000-8000-000000000001
+  HQG_ENGINE_ID: 00000000-0000-4000-8000-000000000002
+  DASHBOARD_SYNC_SECRET: FAKE-SYNC-SECRET
+  PROVIDER_WORKER_SECRET: FAKE-WORKER-SECRET
+  DASHBOARD_SYNC_URL: http://mock-dashboard:8011
+  PROVIDER_API_URL: http://provider-api:8013
+  PAPER_TRADING_URL: http://mock-broker:8012/paper
+  PAPER_DATA_URL: http://mock-broker:8012/paper
+  LIVE_TRADING_URL: http://mock-broker:8012/live
+  LIVE_DATA_URL: http://mock-broker:8012/live
+  DATABASE_URL: postgresql+asyncpg://mvp:FAKE-db-password@mock-db:5432/mvp
+services:
+  mock-db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: mvp
+      POSTGRES_PASSWORD: FAKE-db-password
+      POSTGRES_DB: mvp
+    volumes:
+      - mock-postgres:/var/lib/postgresql
+    networks: [mock]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U mvp -d mvp]
+      interval: 1s
+      retries: 30
+  init-db:
+    <<: *engine
+    environment: *environment
+    command: python -m src.database
+    depends_on:
+      mock-db: {condition: service_healthy}
+  mock-broker:
+    <<: *engine
+    command: python -m uvicorn local.broker:app --host 0.0.0.0 --port 8012
+    # Credentials, fixtures and fault routes exist only inside the test network.
+  mock-readiness:
+    <<: *engine
+    command: python -m uvicorn local.readiness:app --host 0.0.0.0 --port 8014
+  mock-dashboard:
+    <<: *engine
+    volumes:
+      - ./src:/app/src:ro
+      - ./local:/app/local:ro
+      - ../hqg-dashboard:/dashboard:ro
+      - mock-dashboard:/state
+    environment:
+      <<: *environment
+      PYTHONPATH: /app:/dashboard/local
+      MOCK_DASHBOARD_DB: /state/dashboard.db
+      CONTROL_READINESS_URL: http://mock-dashboard:8011/control
+      WEBSITE_READINESS_URL: ${MVP_WEBSITE_URL:-http://host.docker.internal:5173/}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    networks: [mock, browser]
+    ports: ["127.0.0.1:8011:8011"]
+    command: python -m uvicorn server:from_environment --factory --host 0.0.0.0 --port 8011
+  provider-api:
+    <<: *engine
+    environment: *environment
+    command: python -m uvicorn src.provider_instance.server:app --host 0.0.0.0 --port 8013
+    depends_on:
+      init-db: {condition: service_completed_successfully}
+      mock-broker: {condition: service_started}
+      mock-dashboard: {condition: service_started}
+  engine:
+    <<: *engine
+    environment: *environment
+    command: python -m src.main
+    depends_on:
+      provider-api: {condition: service_started}
+networks:
+  mock: {internal: true}
+  browser: {}
+volumes:
+  mock-postgres:
+  mock-dashboard:
