@@ -1,5 +1,9 @@
 # HQG Execution Engine
 
+For current dashboard-controlled **mock execution and saved strategy registration**,
+follow [local/README.md](local/README.md). Real broker execution remains disabled.
+The legacy deployment/configuration notes below do not enable this workflow.
+
 This serves as a containerized trading execution system, including a trading engine, worker to capture past metrics, and a FastAPI server for an external dashboard.
 
 Docker is the recommended way to run the full application in a production environment. This runs all services: PostgreSQL database, FastAPI API server, trading engine, and snapshot job scheduler.

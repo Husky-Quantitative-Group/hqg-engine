@@ -34,7 +34,7 @@ def digest(value):
     )
 
 
-def validate_configuration(config):
+def validate_configuration(config, packages=None):
     if set(config) != {"modes"} or set(config["modes"]) != set(MODES):
         raise ValueError("Both modes required")
 
@@ -56,7 +56,17 @@ def validate_configuration(config):
         for item in spec["strategies"]:
             identity = (item["strategy_id"], item["version"], item["source_digest"])
 
-            if identity not in REGISTRY or item["strategy_id"] in seen:
+            installed = identity in REGISTRY
+            if not installed and packages is not None:
+                from src.control.packages import validate_package
+
+                package = packages.get(item["source_digest"])
+                if package is not None:
+                    approved, _ = validate_package(package)
+                    installed = identity == tuple(
+                        approved[k] for k in ("strategy_id", "version", "source_digest")
+                    )
+            if not installed or item["strategy_id"] in seen:
                 raise ValueError("Unsupported strategy")
 
             if set(item) != {"strategy_id", "version", "source_digest", "allocation"}:

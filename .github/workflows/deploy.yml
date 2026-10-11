@@ -26,6 +26,7 @@ jobs:
         working-directory: hqg-engine
     env:
       MVP_TEST_DATABASE_URL: postgresql+asyncpg://mvp:FAKE-db-password@127.0.0.1:5432/mvp
+      STRATEGY_SANDBOX_IMAGE: hqg-engine-mock-test
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,6 +41,8 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: pip install -r requirements-test.txt
+      - name: Build isolated mock strategy image
+        run: docker build -t "$STRATEGY_SANDBOX_IMAGE" .
       - name: Run tests
         run: pytest
 

@@ -38,6 +38,12 @@ class Rebalance(BaseModel):
     target_weights: dict[str, float]
 
 
+class StrategyFailure(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    context: Context
+    message: str = Field(max_length=500)
+
+
 def from_environment():
     if os.environ.get("BROKER_TRANSPORT") != "mock":
         raise ValueError("Current MVP-POC supports only explicit mock transport")
@@ -129,6 +135,17 @@ def create_app(provider=None, worker_secret=None, background=True):
         except Exception:
             app.state.provider.close(("paper", "live"), "runtime_database_unavailable")
             raise HTTPException(503, "Execution unavailable")
+
+    @app.post("/internal/failure")
+    async def strategy_failure(body: StrategyFailure):
+        context = body.context.model_dump()
+        app.state.provider.admit(context)
+        app.state.provider.close(
+            (context["mode"],), "strategy_execution_failed", force=True
+        )
+        app.state.provider.modes[context["mode"]]["strategy_error"] = body.message
+        await app.state.provider.persist()
+        return {"state": "paused"}
 
     # These paths previously reached the ungated SDK directly.
     @app.post("/execution/{operation}")

@@ -1,7 +1,7 @@
-# Stage 1: mock execution
+# Mock execution and dashboard strategies
 
 The stack uses one fake account, two broker contexts, the installed `mock-balanced`
-strategy, authenticated HTTP sync, PostgreSQL runtime records and a mock dashboard
+strategy plus explicitly registered saved dashboard strategies, authenticated HTTP sync, PostgreSQL runtime records and a mock dashboard
 backend running the same control handlers as the AWS Lambda. The mock backend uses
 SQLite to substitute for DynamoDB locally; the integration suite also verifies the
 DynamoDB transaction adapter with Moto. No Alpaca credentials are needed or read.
@@ -15,7 +15,8 @@ docker compose -p hqg-mvp -f compose.mock.yaml up -d --build
 From `hqg-dashboard/frontend`:
 
 ```sh
-CORE_API_URL=http://127.0.0.1:8011 npm run dev -- --host 0.0.0.0
+IS_PROD=0 CORE_API_URL=http://127.0.0.1:8011 \
+  npm run dev -- --host 0.0.0.0 --port 5173 --strictPort
 ```
 
 The backend probes the actual frontend at `host.docker.internal:5173` and its own
@@ -46,12 +47,21 @@ These login and fault routes exist only in the local mock server. The AWS routes
 use the existing browser authorizer and account permissions.
 
 1. Wait for connected, reconciled paused status.
-2. Choose whether to include live, then configure the approved strategy.
+2. Select strategies/versions and allocations for paper and optionally live, then
+   click **Configure selected strategies**. The built-in strategy is selected by default.
 3. Wait for the configuration to be applied; Start / Resume each enabled mode.
 4. Stop a mode or Stop All. The action stays pending until a later sync reports
    that the provider gate applied the version. Cleanup remains separately visible.
 5. Stop the frontend or mock backend to exercise the health interlock. Reopening
    it restores reporting; use a new Resume for each mode to restore execution.
+
+To run your own code, create a dashboard strategy from **Mock balanced template**,
+edit/save its Code tab, then register the saved version on **Engine** while both
+modes are stopped and reconciled. Select that registered version and its allocation
+before configuring/resuming. See the [milestone 2 guide](../../ENGINE_DASHBOARD_MILESTONE_2_FILE_SUMMARY.md)
+for examples, version pinning, supported input and isolation details.
+The mock worker alone mounts the Docker socket; strategy containers have no socket,
+host mounts, credentials or network. Rebuild the image when upgrading this workflow.
 
 The broker fixtures and balances are separate even when both modes run. Its
 Alpaca-shaped request logs are available only inside the isolated mock network:
@@ -91,13 +101,15 @@ its tables. Both repositories must be present as siblings.
 
 ```sh
 .venv/bin/pip install -r requirements-test.txt
+docker build -t hqg-engine-m2-test .
 MVP_TEST_DATABASE_URL=postgresql+asyncpg://mvp:FAKE-db-password@127.0.0.1:55432/mvp \
+STRATEGY_SANDBOX_IMAGE=hqg-engine-m2-test \
   .venv/bin/python -m pytest tests
 ```
 
 The suite starts real loopback HTTP dashboard, provider, trading and quote servers.
 It denies external DNS/socket destinations, disables proxies/redirects and rejects
-missing or nonlocal mock URLs. The 25 integration scenarios, alongside 56 existing engine checks, cover authorization, immutable strategy
+missing or nonlocal mock URLs. The integration scenarios, alongside existing engine checks, cover authorization, immutable strategy
 versions, transactional/idempotent control, mode isolation, pending Stop,
 backend/control/website failures, delayed/malformed/stale sync, watchdog expiry
 between child orders, cancellation failures/fills, explicit recovery, restart and
@@ -110,4 +122,6 @@ local startup. Provision the account state manually with its UUID, engine identi
 allowed users, approved strategy manifest/image digest and hashed sync secret.
 The readiness URL must traverse the platform control route, which calls the same
 account store/authentication dependency. Defaults deny permission until configured.
-Real broker identity provisioning and TLS engine transport will be in to milestone 2.
+Real broker identity provisioning and TLS engine transport belong to milestones 3/4.
+Dashboard strategy registration is enabled only by the local mock service; AWS
+artifact packaging/registration has not been provisioned or deployed.

@@ -1,9 +1,11 @@
 import asyncio
 import os
+import signal
 from uuid import uuid4
 
 from src.control.contract import MODES, REGISTRY
 from src.control.transport import local_client, Broker
+from src.control.sandbox import Sandbox, validate_weights
 
 
 class Worker:
@@ -14,6 +16,41 @@ class Worker:
         self.session_id = str(uuid4())
         self.brokers = brokers
         self.strategies, self.revision = {}, None
+        self.configuration_lock = asyncio.Lock()
+        self.last_weights = {}
+
+    async def load_configuration(self, state):
+        async with self.configuration_lock:
+            if state["configuration_revision"] == self.revision:
+                return
+            await self.close_strategies()
+            strategies = {}
+            for mode, spec in (state["configuration"] or {}).get("modes", {}).items():
+                strategies[mode] = []
+                for item in spec["strategies"]:
+                    identity = tuple(
+                        item[k] for k in ("strategy_id", "version", "source_digest")
+                    )
+                    if identity in REGISTRY:
+                        instance = REGISTRY[identity]()
+                    else:
+                        instance = Sandbox(
+                            state["strategy_packages"][item["source_digest"]]
+                        )
+                        if instance.identity != {
+                            k: item[k]
+                            for k in ("strategy_id", "version", "source_digest")
+                        }:
+                            raise ValueError("Worker package identity mismatch")
+                    strategies[mode].append((instance, item["allocation"]))
+            self.strategies, self.revision = strategies, state["configuration_revision"]
+            self.last_weights = {}
+
+    async def close_strategies(self):
+        for strategies in self.strategies.values():
+            for instance, _ in strategies:
+                if isinstance(instance, Sandbox):
+                    await asyncio.to_thread(instance.close)
 
     async def register(self):
         for attempt in range(30):
@@ -36,32 +73,16 @@ class Worker:
         if state["worker_session"] != self.session_id:
             raise RuntimeError("Worker session replaced; stop the old worker")
 
-        if state["configuration_revision"] != self.revision:
-            self.strategies = {}
-            for m, spec in (state["configuration"] or {}).get("modes", {}).items():
-                self.strategies[m] = [
-                    (
-                        REGISTRY[
-                            (s["strategy_id"], s["version"], s["source_digest"])
-                        ](),
-                        s["allocation"],
-                    )
-                    for s in spec["strategies"]
-                ]
-
-            self.revision = state["configuration_revision"]
-
         if not state["modes"][mode]["gate_open"]:
+            await self.load_configuration(state)
+            # Stopped strategy contexts release their containers. Resume starts fresh.
+            for instance, _ in self.strategies.get(mode, []):
+                if isinstance(instance, Sandbox):
+                    await asyncio.to_thread(instance.close)
+            self.last_weights = {
+                key: value for key, value in self.last_weights.items() if key[0] != mode
+            }
             return None
-
-        strategies = self.strategies[mode]
-        symbols = sorted({s for instance, _ in strategies for s in instance.universe})
-        prices = await self.brokers[mode].quotes(symbols)
-        weights = {}
-
-        for instance, allocation in strategies:
-            for symbol, weight in instance.on_data(prices).items():
-                weights[symbol] = weights.get(symbol, 0) + weight * allocation
 
         context = {
             k: state[k]
@@ -74,6 +95,57 @@ class Worker:
             )
         }
         context["mode"] = mode
+        try:
+            await self.load_configuration(state)
+            strategies = self.strategies[mode]
+            broker = self.brokers[mode]
+            positions = {
+                p["symbol"]: float(p["qty"])
+                for p in await broker.request("GET", "v2/positions")
+            }
+            account = await broker.request("GET", "v2/account")
+            symbols = sorted(
+                {s for instance, _ in strategies for s in instance.universe}
+                | set(positions)
+            )
+            prices = await broker.quotes(symbols)
+            equity = float(account["equity"])
+            held_weights = {s: q * prices[s] / equity for s, q in positions.items()}
+            portfolio = {
+                "equity": equity,
+                "cash": equity - sum(q * prices[s] for s, q in positions.items()),
+                "positions": positions,
+                "weights": held_weights,
+            }
+            weights = {}
+            all_hold, initial_hold = True, False
+            for index, (instance, allocation) in enumerate(strategies):
+                data = {s: prices[s] for s in instance.universe}
+                targets = (
+                    await asyncio.to_thread(instance.on_data, data, portfolio)
+                    if isinstance(instance, Sandbox)
+                    else instance.on_data(data)
+                )
+                if targets is None:
+                    initial_hold |= (mode, index) not in self.last_weights
+                    targets = self.last_weights.get((mode, index), {})
+                else:
+                    all_hold = False
+                    targets = validate_weights(targets, instance.universe)
+                    self.last_weights[(mode, index)] = targets
+                for symbol, weight in targets.items():
+                    weights[symbol] = weights.get(symbol, 0) + weight * allocation
+            # No strategy target exists yet for an initial Hold. Retain the
+            # entire mode until every allocation has supplied its first target.
+            if all_hold or initial_hold:
+                weights = held_weights
+        except Exception as exc:
+            # Bind failures to the same session/version as the calculation. A stale
+            # failure must not close a newly resumed context.
+            await self.client.post(
+                "internal/failure", json={"context": context, "message": str(exc)[:500]}
+            )
+            raise
         response = await self.client.post(
             "internal/rebalance",
             json={
@@ -98,13 +170,16 @@ class Worker:
             await asyncio.sleep(5)
 
     async def run(self):
-        await self.register()
         try:
+            await self.register()
             await asyncio.gather(*(self.mode_loop(mode) for mode in MODES))
         finally:
-            await self.client.aclose()
-            for broker in self.brokers.values():
-                await broker.close()
+            try:
+                await self.close_strategies()
+            finally:
+                await self.client.aclose()
+                for broker in self.brokers.values():
+                    await broker.close()
 
 
 async def run():
@@ -122,6 +197,13 @@ async def run():
         for m in MODES
     }
 
-    await Worker(
-        os.environ["PROVIDER_API_URL"], os.environ["PROVIDER_WORKER_SECRET"], brokers
-    ).run()
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
+    try:
+        await Worker(
+            os.environ["PROVIDER_API_URL"],
+            os.environ["PROVIDER_WORKER_SECRET"],
+            brokers,
+        ).run()
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)

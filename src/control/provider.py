@@ -18,6 +18,7 @@ from src.control.contract import (
     validate_configuration,
 )
 from src.control.transport import local_client
+from src.control.packages import validate_package
 
 TERMINAL = {"filled", "canceled", "expired", "rejected"}
 
@@ -53,6 +54,7 @@ class Provider:
         self.deadline, self.healthy = 0, False
         self.contexts_verified, self.sync_error = False, None
         self.version, self.revision, self.configuration = 0, 0, None
+        self.packages, self.approved = {}, copy.deepcopy(APPROVED)
         self.modes = {
             m: {
                 "state": "unconfigured",
@@ -64,6 +66,7 @@ class Provider:
                 "outstanding_orders": [],
                 "order_outcomes": [],
                 "last_successful_cycle": None,
+                "strategy_error": None,
             }
             for m in MODES
         }
@@ -85,6 +88,8 @@ class Provider:
                 digest(self.configuration) if self.configuration else None
             ),
             configuration=self.configuration,
+            strategy_packages=copy.deepcopy(self.packages),
+            approved_strategies=copy.deepcopy(self.approved),
             modes=copy.deepcopy(self.modes),
         )
 
@@ -165,10 +170,11 @@ class Provider:
                 request_id, sent = str(uuid4()), time.monotonic()
                 body = self.state()
                 body.pop("configuration")
+                body.pop("strategy_packages")
                 body.update(
                     request_id=request_id,
                     image_digest=IMAGE_DIGEST,
-                    approved_strategies=APPROVED,
+                    approved_strategies=self.approved,
                 )
 
                 async with asyncio.timeout(self.timeout):
@@ -216,9 +222,26 @@ class Provider:
                     elif desired["resume_incident_id"] is not None:
                         raise ValueError("Paused mode cannot carry Resume permission")
 
+                packages = data.get("strategy_packages", {})
+                if not isinstance(packages, dict) or len(packages) > 32:
+                    raise ValueError("Invalid registered packages")
+                approved = copy.deepcopy(APPROVED)
+                for source_digest, package in packages.items():
+                    identity, _ = validate_package(package)
+                    if identity["source_digest"] != source_digest:
+                        raise ValueError("Strategy package digest mismatch")
+                    if (
+                        source_digest in self.packages
+                        and self.packages[source_digest] != package
+                    ):
+                        raise ValueError("Installed package changed")
+                    approved.append(identity)
+                if any(item not in approved for item in self.approved):
+                    raise ValueError("Installed strategy removed")
+
                 config = data["configuration"]
                 if config is not None:
-                    validate_configuration(config)
+                    validate_configuration(config, packages)
                     if digest(config) != data["configuration_digest"]:
                         raise ValueError("Configuration digest mismatch")
                 elif (
@@ -238,6 +261,7 @@ class Provider:
                     raise ValueError("Configuration requires reconciled pause")
 
                 self.version = data["control_version"]
+                self.packages, self.approved = packages, approved
                 if changed:
                     self.close(MODES, "configuration_changed", force=True)
                     self.configuration, self.revision = (
@@ -278,7 +302,12 @@ class Provider:
                         and self.healthy
                         and time.monotonic() < self.deadline
                     ):
-                        state.update(gate_open=True, state="running", stop_reason=None)
+                        state.update(
+                            gate_open=True,
+                            state="running",
+                            stop_reason=None,
+                            strategy_error=None,
+                        )
             except Exception as exc:
                 self.sync_error = (
                     str(exc) if isinstance(exc, ValueError) else type(exc).__name__
@@ -431,8 +460,7 @@ class Provider:
         operation_id = str(UUID(operation_id))
 
         if (
-            not weights
-            or any(not math.isfinite(w) or not 0 <= w <= 1 for w in weights.values())
+            any(not math.isfinite(w) or not 0 <= w <= 1 for w in weights.values())
             or sum(weights.values()) > 1
         ):
             raise HTTPException(400, "Invalid target weights")
@@ -467,7 +495,8 @@ class Provider:
             for p in await broker.request("GET", "v2/positions")
         }
 
-        prices = await broker.quotes(sorted(set(weights) | set(positions)))
+        symbols = sorted(set(weights) | set(positions))
+        prices = await broker.quotes(symbols) if symbols else {}
         orders = []
         for symbol in sorted(set(weights) | set(positions)):
             qty = round(

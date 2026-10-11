@@ -73,7 +73,12 @@ services:
       mock-dashboard: {condition: service_started}
   engine:
     <<: *engine
-    environment: *environment
+    environment:
+      <<: *environment
+      STRATEGY_SANDBOX_IMAGE: ${MVP_ENGINE_IMAGE:-hqg-engine-mock}
+    volumes:
+      - ./src:/app/src:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     command: python -m src.main
     depends_on:
       provider-api: {condition: service_started}
