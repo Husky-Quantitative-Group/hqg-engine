@@ -1,4 +1,4 @@
-"""Manual mock-stack replacement, after stopping the old provider and waiting."""
+"""Manual local-stack replacement, after stopping the old provider and waiting."""
 
 import os
 import sys
@@ -16,6 +16,8 @@ if not state or time.time() - (state.get("last_sync") or 0) < 15:
         "Stop the previous provider and wait at least 15 seconds after its last sync"
     )
 
+# Local development does not pin a Docker image identity.
+state["image_digest"] = None
 state["boot_id"] = None
 state["observed"] = None
 state["last_sync"] = None

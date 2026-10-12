@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import os
 from uuid import uuid4
 
 import httpx
@@ -7,8 +8,8 @@ import pytest
 from sqlalchemy import select, text
 
 from conftest import Harness, ACCOUNT, HTTPServer, WORKER_SECRET
-from src.control.contract import APPROVED
-from src.control.transport import Broker, local_client
+from conftest import APPROVED, PACKAGE
+from src.control.transport import local_client
 from src.control.worker import Worker
 from src.db.models import Portfolio, AllocationEvent, ExecutionEvent
 
@@ -17,9 +18,11 @@ def run(coroutine):
     asyncio.run(coroutine)
 
 
+@pytest.mark.skipif(not os.environ.get("STRATEGY_SANDBOX_IMAGE"), reason="Docker strategy image required")
 def test_authorization_configuration_and_concurrent_worker_contexts(tmp_path):
     async def scenario():
         async with Harness(tmp_path) as h:
+            h.provider.max_ttl = h.dashboard_app.state.control.ttl = 15
             async with httpx.AsyncClient(
                 base_url=h.dashboard.url, trust_env=False
             ) as stranger:
@@ -41,19 +44,9 @@ def test_authorization_configuration_and_concurrent_worker_contexts(tmp_path):
             assert (
                 await h.user.put(f"/accounts/{ACCOUNT}/configuration", json=changed)
             ).status_code == 400
-            worker = Worker(
-                h.provider_server.url,
-                WORKER_SECRET,
-                {
-                    m: Broker(
-                        m,
-                        h.broker.url + "/" + m,
-                        h.broker.url + "/" + m,
-                        read_only=True,
-                    )
-                    for m in ("paper", "live")
-                },
-            )
+            worker = Worker(h.provider_server.url, WORKER_SECRET)
+            h.stack.push_async_callback(worker.close_strategies)
+            h.stack.push_async_callback(worker.client.aclose)
             await worker.register()
             await h.sync_clean()
             await h.resume("paper")
@@ -62,7 +55,7 @@ def test_authorization_configuration_and_concurrent_worker_contexts(tmp_path):
             assert (
                 worker.strategies["paper"][0][0] is not worker.strategies["live"][0][0]
             )
-            assert worker.strategies["paper"][0][0].cycles == 1
+            assert worker.strategies["paper"][0][0].container is not None
             async with h.sessions() as session:
                 portfolios = (await session.execute(select(Portfolio))).scalars().all()
                 assert {p.mode for p in portfolios} == {"paper", "live"}
@@ -117,9 +110,6 @@ def test_authorization_configuration_and_concurrent_worker_contexts(tmp_path):
                 assert (
                     await h.execution.post("/execution/" + mutation)
                 ).status_code == 410
-            await worker.client.aclose()
-            for broker in worker.brokers.values():
-                await broker.close()
 
     run(scenario())
 
@@ -436,6 +426,13 @@ def test_dynamodb_atomic_configuration_audit_and_idempotency(tmp_path):
                         "body": {"S": json.dumps(state)},
                     },
                 )
+                client.put_item(
+                    TableName="accounts",
+                    Item={
+                        **store.key(ACCOUNT, "package#" + APPROVED[0]["source_digest"]),
+                        "body": {"S": json.dumps(PACKAGE)},
+                    },
+                )
                 h.store = store
                 h.dashboard_app.state.control.store = store
                 body, result = await h.configure()
@@ -575,5 +572,78 @@ def test_broker_faults_reconcile_without_retrying_submission(tmp_path, fault):
             assert len([r for r in ctx["requests"] if r["method"] == "POST"]) == 1
             assert all(not status["gate_open"] for status in h.provider.modes.values())
             await h.resume("paper")
+
+    run(scenario())
+
+
+def test_paper_only_credentials_sync_and_disabled_live_reconciliation(tmp_path):
+    async def scenario():
+        async with Harness(tmp_path) as h:
+            await h.provider.brokers.pop("live").close()
+            h.provider.contexts_verified = False
+            await h.configure(live=False)
+            assert await h.provider.sync_once()
+            await h.provider.reconcile("live")
+            assert h.provider.modes["live"]["reconciled"]
+            await h.resume("paper")
+            assert h.provider.modes["paper"]["gate_open"]
+            assert not h.provider.modes["live"]["gate_open"]
+            assert (await h.execution.get("/internal/broker/live/account")).status_code == 409
+            state = await h.status()
+            config = copy.deepcopy(state["configuration"])
+            config["modes"]["live"].update(enabled=True, strategies=[{**APPROVED[0], "allocation": 1}])
+            assert (await h.action("stop_all"))[1].status_code == 200
+            await h.sync_clean()
+            state = await h.status()
+            response = await h.user.put(f"/accounts/{ACCOUNT}/configuration", json={
+                "configuration": config, "idempotency_key": str(uuid4()),
+                "expected_control_version": state["control_version"],
+            })
+            assert response.status_code == 200
+            assert not await h.provider.sync_once()
+            assert h.provider.sync_error == "Enabled mode has no Alpaca credentials"
+            assert not any(mode["gate_open"] for mode in h.provider.modes.values())
+    run(scenario())
+
+
+def test_real_broker_account_pinning_mismatch_fails_closed(tmp_path):
+    async def scenario():
+        async with Harness(tmp_path) as h:
+            h.provider.contexts_verified = False
+            h.provider.brokers["paper"].account_id = str(uuid4())
+            assert not await h.provider.sync_once()
+            assert h.provider.sync_error == "Broker account/mode binding mismatch"
+            assert not any(mode["gate_open"] for mode in h.provider.modes.values())
+    run(scenario())
+
+
+@pytest.mark.parametrize("status,expected", [(401, "rejected"), (422, "rejected"), (504, "uncertain")])
+def test_sdk_order_errors_preserve_reconciliation_status(tmp_path, monkeypatch, status, expected):
+    import json
+    import requests
+    from src.control.transport import Broker
+
+    def send(self, request, **kwargs):
+        result = requests.Response()
+        result.status_code, result.request = status, request
+        result._content = json.dumps({"code": status, "message": "Injected SDK error"}).encode()
+        return result
+
+    monkeypatch.setattr(requests.Session, "send", send)
+
+    async def scenario():
+        async with Harness(tmp_path) as h:
+            await h.configure(live=False)
+            await h.resume("paper")
+            previous = h.provider.brokers["paper"]
+            broker = Broker("paper", "test-key", "test-secret")
+            h.provider.brokers["paper"] = broker
+            try:
+                assert (await h.order("paper")).status_code == 503
+                assert {r["status"] for r in (await h.runtime.orders("paper")).values()} == {expected}
+                assert not any(mode["gate_open"] for mode in h.provider.modes.values())
+            finally:
+                h.provider.brokers["paper"] = previous
+                await broker.close()
 
     run(scenario())

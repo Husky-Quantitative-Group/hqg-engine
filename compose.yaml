@@ -1,3 +1,10 @@
+x-control-environment: &control-environment
+  HQG_ACCOUNT_ID: 00000000-0000-4000-8000-000000000001
+  HQG_ENGINE_ID: 00000000-0000-4000-8000-000000000002
+  DASHBOARD_SYNC_SECRET: local-development-sync-secret
+  PROVIDER_WORKER_SECRET: local-development-worker-secret
+  DASHBOARD_SYNC_URL: http://mock-dashboard:8011
+
 services:
   db:
     image: postgres:18
@@ -39,7 +46,7 @@ services:
       - hqg_network
 
   provider-api:
-    build:
+    build: &engine-build
       context: .
       dockerfile: Dockerfile
       args:
@@ -55,7 +62,11 @@ services:
         condition: service_completed_successfully
       db:
         condition: service_healthy
+      mock-dashboard:
+        condition: service_started
     environment:
+      <<: *control-environment
+      DATABASE_URL: ${DATABASE_URL}
       NO_PROXY: ${NO_PROXY}
       no_proxy: ${no_proxy}
       HTTP_PROXY: ${HTTP_PROXY}
@@ -65,7 +76,8 @@ services:
       PROVIDER: ${PROVIDER}
       ALPACA_API_KEY: ${ALPACA_API_KEY}
       ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
-      ALPACA_PAPER: ${ALPACA_PAPER}
+      ALPACA_PAPER: ${ALPACA_PAPER:-true}
+      ALPACA_DATA_FEED: ${ALPACA_DATA_FEED:-iex}
       IBKR_HOST: ${IBKR_HOST}
       IBKR_PORT: ${IBKR_PORT}
       IBKR_CLIENT_ID: ${IBKR_CLIENT_ID}
@@ -81,6 +93,7 @@ services:
     restart: unless-stopped
     networks:
       - hqg_network
+      - control
 
   dashboard-api:
     build:
@@ -124,6 +137,8 @@ services:
       - hqg_network
 
   snapshot:
+    # Uses retired provider read endpoints; retained for separate migration.
+    profiles: [legacy-snapshot]
     build:
       context: .
       dockerfile: Dockerfile
@@ -155,6 +170,7 @@ services:
       - hqg_network
 
   engine:
+    image: hqg-engine-local
     build:
       context: .
       dockerfile: Dockerfile
@@ -174,22 +190,54 @@ services:
       provider-api:
         condition: service_healthy
     environment:
+      <<: *control-environment
       DATABASE_URL: ${DATABASE_URL}
       NO_PROXY: ${NO_PROXY}
       no_proxy: ${no_proxy}
       PROVIDER_API_URL: http://provider-api:8000
+      STRATEGY_SANDBOX_IMAGE: hqg-engine-local
     volumes:
       - ./src/config:/app/src/config:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     expose:
       - "8000"
     command: python3 -m src.main
     restart: unless-stopped
     networks:
+      - control
+
+  mock-readiness:
+    build: *engine-build
+    command: python3 -m uvicorn local.readiness:app --host 0.0.0.0 --port 8014
+    restart: unless-stopped
+    networks:
+      - control
+
+  mock-dashboard:
+    build: *engine-build
+    volumes:
+      - ../hqg-dashboard:/dashboard:ro
+      - dashboard_data:/state
+    environment:
+      <<: *control-environment
+      PYTHONPATH: /app:/dashboard/local
+      MOCK_DASHBOARD_DB: /state/dashboard.db
+      CONTROL_READINESS_URL: http://mock-dashboard:8011/control
+      WEBSITE_READINESS_URL: ${LOCAL_WEBSITE_URL:-http://host.docker.internal:5173/}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports: ["127.0.0.1:8011:8011"]
+    command: python3 -m uvicorn server:from_environment --factory --host 0.0.0.0 --port 8011
+    restart: unless-stopped
+    networks:
       - hqg_network
+      - control
 
 volumes:
   postgres_data:
+  dashboard_data:
 
 networks:
   hqg_network:
     external: true
+  control:
+    internal: true

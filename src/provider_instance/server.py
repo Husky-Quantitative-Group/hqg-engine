@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src.control.provider import Provider
 from src.control.runtime import Runtime
-from src.control.transport import Broker
+from src.control.transport import brokers_from_environment
 
 
 class Context(BaseModel):
@@ -45,20 +45,10 @@ class StrategyFailure(BaseModel):
 
 
 def from_environment():
-    if os.environ.get("BROKER_TRANSPORT") != "mock":
-        raise ValueError("Current MVP-POC supports only explicit mock transport")
-
     from src.database import async_session
 
     account_id = os.environ["HQG_ACCOUNT_ID"]
-    brokers = {
-        mode: Broker(
-            mode,
-            os.environ[f"{mode.upper()}_TRADING_URL"],
-            os.environ[f"{mode.upper()}_DATA_URL"],
-        )
-        for mode in ("paper", "live")
-    }
+    brokers = brokers_from_environment()
 
     return Provider(
         account_id,
@@ -107,6 +97,20 @@ def create_app(provider=None, worker_secret=None, background=True):
     @app.post("/internal/sessions/{session_id}")
     async def register(session_id: UUID):
         return await app.state.provider.register_worker(str(session_id))
+
+    @app.get("/internal/broker/{mode}/{resource}")
+    async def broker_read(mode: str, resource: str, symbols: str = ""):
+        broker = app.state.provider.brokers.get(mode)
+        if broker is None:
+            raise HTTPException(409, "Alpaca mode is not configured")
+        if resource in {"account", "positions"}:
+            return await broker.request("GET", "v2/" + resource)
+        if resource not in {"quotes", "bars"}:
+            raise HTTPException(404, "Unknown broker read")
+        tickers = symbols.split(",") if symbols else []
+        if not tickers or len(tickers) > 200:
+            raise HTTPException(400, "1-200 symbols required")
+        return await getattr(broker, resource)(tickers)
 
     @app.post("/internal/order")
     async def order(body: Order):

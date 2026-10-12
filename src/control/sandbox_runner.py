@@ -60,8 +60,8 @@ def main():
                         result = {"ready": True}
                     else:
                         bars = {
-                            symbol: Bar(open=p, high=p, low=p, close=p, volume=None)
-                            for symbol, p in message["prices"].items()
+                            symbol: Bar(**bar)
+                            for symbol, bar in message["bars"].items()
                         }
                         signal = instance.on_data(
                             Slice(bars), PortfolioView(**message["portfolio"])

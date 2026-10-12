@@ -1,112 +1,34 @@
 # HQG Execution Engine
 
-For current dashboard-controlled **mock execution and saved strategy registration**,
-follow [local/README.md](local/README.md). Real broker execution remains disabled.
-The legacy deployment/configuration notes below do not enable this workflow.
+Run dashboard-created strategies against real Alpaca paper trading using
+`compose.yaml` and `.env`. The stack includes PostgreSQL, the provider, isolated
+strategy workers, and local AWS substitutes for the dashboard.
 
-This serves as a containerized trading execution system, including a trading engine, worker to capture past metrics, and a FastAPI server for an external dashboard.
+For a new setup, copy `.env.example` to `.env`. If `.env` already exists, add the
+settings from the example while keeping your other values. Set `ALPACA_API_KEY`
+and `ALPACA_SECRET_KEY` to your paper account keys and `ALPACA_PAPER=true`, then
+configure the existing PostgreSQL settings (`DATABASE_URL` uses host `db`). Keep
+the existing `hqg_network` Docker network, or create it for a new setup:
 
-Docker is the recommended way to run the full application in a production environment. This runs all services: PostgreSQL database, FastAPI API server, trading engine, and snapshot job scheduler.
-
-### Quick Start (VM Deployment)
-
-1. **SSH into your virtual machine**
-   ```bash
-   ssh user@your-vm-ip
-   ```
-
-2. **Clone the repository**
-   ```bash
-   git clone https://github.com/Husky-Quantitative-Group/hqg-engine.git
-   cd hqg-engine
-   ```
-
-3. **Set up environment variables**
-   ```bash
-   cp .env.example .env
-   nano .env
-   # Edit .env with your actual credentials
-   ```
-
-4. **Start all services**
-   ```bash
-   docker-compose up --build -d
-   ```
-
-5. **Verify services are running**
-   ```bash
-   docker-compose ps
-   # After, all services should show "Up" status
-   ```
-
-6. **Test the API (from within VM)**
-   ```bash
-   curl http://localhost:8000/health
-   # This should return: {"status":"healthy"}
-   ```
-
-   It may also be necessary to configure the firewall to allow inbound traffic, as well as the security group in any external dashboard's cloud provider.
-
-### Common Docker Operations
-
-**View logs:**
-```bash
-docker-compose logs -f
-
-docker-compose logs -f api
-docker-compose logs -f engine
-docker-compose logs -f snapshot
-docker-compose logs -f db
+```sh
+docker network create hqg_network # Only if it does not already exist.
+docker compose up -d --build
 ```
 
-**Restart a service:**
-```bash
-docker-compose restart api
-docker-compose restart engine
-docker-compose restart snapshot
+Compose reads `.env` automatically. Rebuild with `--build` after engine changes.
+
+Follow [local/README.md](local/README.md) for frontend startup, strategy
+registration, Stop/Resume controls, restarts, and tests.
+
+```sh
+docker compose ps
+docker compose logs -f provider-api engine
+docker compose down
 ```
 
-**Stop all services:**
-```bash
-docker-compose down
-```
+`down` keeps the local databases. Alpaca keys are passed only to the provider;
+strategy containers have no credentials, host mounts, or network access.
 
-**Rebuild after code changes:**
-```bash
-git pull
-docker-compose up --build -d
-```
-
-### Externally Accessing the API
-- **API**: http://VM_IP:8000
-- **API Docs**: http://VM_IP:8000/docs
-- **Health Check**: http://VM_IP:8000/health
-
-## Configuration Setup
-
-### Environment Variables (.env)
-
-- **Database Configuration**
-  - `DATABASE_URL`: PostgreSQL connection string (format: `postgresql+asyncpg://USER:PASSWORD@HOST:PORT/DATABASE`)
-  - `POSTGRES_DB`: Database name
-  - `POSTGRES_USER`: Database user
-  - `POSTGRES_PASSWORD`: Database password
-
-- **Execution Provider Selection**
-  - `PROVIDER`: Set to `"alpaca"` or `"ib" accordingly
-
-- **Alpaca Configuration**
-  - `ALPACA_API_KEY`: Your Alpaca API key
-  - `ALPACA_SECRET_KEY`: Your Alpaca secret key
-  - `ALPACA_PAPER`: Set to `"true"` for paper trading, `"false"` for live trading
-
-- **IBKR Configuration**
-  - `IBKR_HOST`: IBKR TWS/Gateway host
-  - `IBKR_PORT`: IBKR TWS/Gateway port
-  - `IBKR_CLIENT_ID`: Unique client ID for this connection
-
-### Config Files
-
-- **`src/config/portfolio.yaml`**: Portfolio and strategy configuration
-  - Define which strategies are active
-  - Set portfolio weights for each strategy
+The original `dashboard-api` remains available for database-backed history. The
+old `snapshot` job is retained under the `legacy-snapshot` profile; its retired
+provider read endpoints need migration before it can be used with this workflow.

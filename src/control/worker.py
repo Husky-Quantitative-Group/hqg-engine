@@ -3,18 +3,18 @@ import os
 import signal
 from uuid import uuid4
 
-from src.control.contract import MODES, REGISTRY
-from src.control.transport import local_client, Broker
+from src.control.contract import MODES
+from src.control.transport import local_client, BrokerReader
 from src.control.sandbox import Sandbox, validate_weights
 
 
 class Worker:
-    def __init__(self, provider_url, secret, brokers):
+    def __init__(self, provider_url, secret, brokers=None):
         self.client = local_client(
-            provider_url, headers={"Authorization": "Bearer " + secret}
+            provider_url, timeout=30, headers={"Authorization": "Bearer " + secret}
         )
         self.session_id = str(uuid4())
-        self.brokers = brokers
+        self.brokers = brokers or {mode: BrokerReader(mode, self.client) for mode in MODES}
         self.strategies, self.revision = {}, None
         self.configuration_lock = asyncio.Lock()
         self.last_weights = {}
@@ -28,20 +28,11 @@ class Worker:
             for mode, spec in (state["configuration"] or {}).get("modes", {}).items():
                 strategies[mode] = []
                 for item in spec["strategies"]:
-                    identity = tuple(
-                        item[k] for k in ("strategy_id", "version", "source_digest")
-                    )
-                    if identity in REGISTRY:
-                        instance = REGISTRY[identity]()
-                    else:
-                        instance = Sandbox(
-                            state["strategy_packages"][item["source_digest"]]
-                        )
-                        if instance.identity != {
-                            k: item[k]
-                            for k in ("strategy_id", "version", "source_digest")
-                        }:
-                            raise ValueError("Worker package identity mismatch")
+                    instance = Sandbox(state["strategy_packages"][item["source_digest"]])
+                    if instance.identity != {
+                        k: item[k] for k in ("strategy_id", "version", "source_digest")
+                    }:
+                        raise ValueError("Worker package identity mismatch")
                     strategies[mode].append((instance, item["allocation"]))
             self.strategies, self.revision = strategies, state["configuration_revision"]
             self.last_weights = {}
@@ -113,19 +104,18 @@ class Worker:
             held_weights = {s: q * prices[s] / equity for s, q in positions.items()}
             portfolio = {
                 "equity": equity,
-                "cash": equity - sum(q * prices[s] for s, q in positions.items()),
+                "cash": float(account["cash"]),
                 "positions": positions,
                 "weights": held_weights,
             }
+            bars = await broker.bars(
+                sorted({s for instance, _ in strategies for s in instance.universe})
+            )
             weights = {}
             all_hold, initial_hold = True, False
             for index, (instance, allocation) in enumerate(strategies):
-                data = {s: prices[s] for s in instance.universe}
-                targets = (
-                    await asyncio.to_thread(instance.on_data, data, portfolio)
-                    if isinstance(instance, Sandbox)
-                    else instance.on_data(data)
-                )
+                data = {symbol: bars[symbol] for symbol in instance.universe}
+                targets = await asyncio.to_thread(instance.on_data, data, portfolio)
                 if targets is None:
                     initial_hold |= (mode, index) not in self.last_weights
                     targets = self.last_weights.get((mode, index), {})
@@ -138,7 +128,7 @@ class Worker:
             # No strategy target exists yet for an initial Hold. Retain the
             # entire mode until every allocation has supplied its first target.
             if all_hold or initial_hold:
-                weights = held_weights
+                return None
         except Exception as exc:
             # Bind failures to the same session/version as the calculation. A stale
             # failure must not close a newly resumed context.
@@ -183,27 +173,12 @@ class Worker:
 
 
 async def run():
-    if os.environ.get("BROKER_TRANSPORT") != "mock":
-        raise ValueError("Current MVP-POC requires mock transport")
-
-    # In the mock stack workers have read-only fixtures; only the provider has mutation credentials.
-    brokers = {
-        m: Broker(
-            m,
-            os.environ[f"{m.upper()}_TRADING_URL"],
-            os.environ[f"{m.upper()}_DATA_URL"],
-            read_only=True,
-        )
-        for m in MODES
-    }
-
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
     try:
         await Worker(
             os.environ["PROVIDER_API_URL"],
             os.environ["PROVIDER_WORKER_SECRET"],
-            brokers,
         ).run()
     finally:
         loop.remove_signal_handler(signal.SIGTERM)

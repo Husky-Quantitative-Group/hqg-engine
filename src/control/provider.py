@@ -9,11 +9,10 @@ from uuid import uuid4, UUID
 
 import httpx
 from fastapi import HTTPException
+from alpaca.common.exceptions import APIError
 
 from src.control.contract import (
     MODES,
-    APPROVED,
-    IMAGE_DIGEST,
     digest,
     validate_configuration,
 )
@@ -38,12 +37,13 @@ class Provider:
     ):
         self.account_id, self.engine_id = str(UUID(account_id)), str(UUID(engine_id))
         if (
-            set(brokers) != set(MODES)
+            not brokers
+            or not set(brokers) <= set(MODES)
             or not secret
             or not 0 < timeout < ttl
             or not 0 < interval < ttl
         ):
-            raise ValueError("Both broker contexts and valid sync timing required")
+            raise ValueError("At least one broker context and valid sync timing required")
 
         self.secret, self.brokers, self.runtime = secret, brokers, runtime
         self.interval, self.timeout, self.max_ttl = interval, timeout, ttl
@@ -54,7 +54,7 @@ class Provider:
         self.deadline, self.healthy = 0, False
         self.contexts_verified, self.sync_error = False, None
         self.version, self.revision, self.configuration = 0, 0, None
-        self.packages, self.approved = {}, copy.deepcopy(APPROVED)
+        self.packages, self.approved = {}, []
         self.modes = {
             m: {
                 "state": "unconfigured",
@@ -161,10 +161,15 @@ class Provider:
         async with self.sync_lock:
             try:
                 if not self.contexts_verified:
+                    account_ids = set()
                     for mode, broker in self.brokers.items():
                         account = await broker.request("GET", "v2/account")
-                        if account["id"] != f"mock-{mode}":
+                        account_id = str(UUID(account["id"]))
+                        if account_id in account_ids or (
+                            broker.account_id and account_id != broker.account_id
+                        ):
                             raise ValueError("Broker account/mode binding mismatch")
+                        account_ids.add(account_id)
                     self.contexts_verified = True
     
                 request_id, sent = str(uuid4()), time.monotonic()
@@ -173,7 +178,7 @@ class Provider:
                 body.pop("strategy_packages")
                 body.update(
                     request_id=request_id,
-                    image_digest=IMAGE_DIGEST,
+                    image_digest=None,
                     approved_strategies=self.approved,
                 )
 
@@ -225,7 +230,7 @@ class Provider:
                 packages = data.get("strategy_packages", {})
                 if not isinstance(packages, dict) or len(packages) > 32:
                     raise ValueError("Invalid registered packages")
-                approved = copy.deepcopy(APPROVED)
+                approved = []
                 for source_digest, package in packages.items():
                     identity, _ = validate_package(package)
                     if identity["source_digest"] != source_digest:
@@ -242,6 +247,11 @@ class Provider:
                 config = data["configuration"]
                 if config is not None:
                     validate_configuration(config, packages)
+                    if any(
+                        spec["enabled"] and mode not in self.brokers
+                        for mode, spec in config["modes"].items()
+                    ):
+                        raise ValueError("Enabled mode has no Alpaca credentials")
                     if digest(config) != data["configuration_digest"]:
                         raise ValueError("Configuration digest mismatch")
                 elif (
@@ -402,16 +412,9 @@ class Provider:
                 raise
             try:
 
-                async def final_admission(event, _info):
-                    # httpcore invokes this after connection/pool waits, just before writing.
-                    if event == "http11.send_request_headers.started":
-                        self.admit(context)
-
                 order = await self.brokers[mode].request(
-                    "POST",
-                    "v2/orders",
-                    json=payload,
-                    extensions={"trace": final_admission},
+                    "POST", "v2/orders", json=payload,
+                    before_send=lambda: self.admit(context),
                 )
                 details = {
                     "request": payload,
@@ -434,9 +437,9 @@ class Provider:
                 )
                 raise
             except Exception as exc:
-                if isinstance(
-                    exc, httpx.HTTPStatusError
-                ) and exc.response.status_code in (400, 401, 403, 422):
+                if isinstance(exc, (httpx.HTTPStatusError, APIError)) and (
+                    exc.response.status_code if exc.response is not None else None
+                ) in (400, 401, 403, 422):
                     await self.runtime.save_order(
                         mode, client_id, {"request": payload, "status": "rejected"}
                     )
@@ -538,7 +541,12 @@ class Provider:
             await asyncio.sleep(min(1, self.interval))
 
     async def reconcile(self, mode):
-        state, broker = self.modes[mode], self.brokers[mode]
+        state = self.modes[mode]
+        if mode not in self.brokers:
+            state.update(reconciled=True, outstanding_orders=[], order_outcomes=[])
+            await self.persist()
+            return
+        broker = self.brokers[mode]
 
         if state["gate_open"]:
             return

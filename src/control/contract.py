@@ -1,26 +1,8 @@
 import hashlib
 import json
-from pathlib import Path
 from uuid import UUID
 
-from src.strategies.mock_balanced import MockBalanced
-
 MODES = ("paper", "live")
-SOURCE_DIGEST = (
-    "sha256:"
-    + hashlib.sha256(
-        Path(__file__).parents[1].joinpath("strategies/mock_balanced.py").read_bytes()
-    ).hexdigest()
-)
-APPROVED = [
-    {"strategy_id": "mock-balanced", "version": 1, "source_digest": SOURCE_DIGEST}
-]
-# A reproducible mock package identity - real image pinning will be done later.
-IMAGE_DIGEST = (
-    "sha256:"
-    + hashlib.sha256(json.dumps(APPROVED, sort_keys=True).encode()).hexdigest()
-)
-REGISTRY = {("mock-balanced", 1, SOURCE_DIGEST): MockBalanced}
 
 
 def digest(value):
@@ -56,8 +38,8 @@ def validate_configuration(config, packages=None):
         for item in spec["strategies"]:
             identity = (item["strategy_id"], item["version"], item["source_digest"])
 
-            installed = identity in REGISTRY
-            if not installed and packages is not None:
+            installed = False
+            if packages is not None:
                 from src.control.packages import validate_package
 
                 package = packages.get(item["source_digest"])

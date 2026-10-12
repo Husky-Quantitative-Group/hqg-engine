@@ -7,7 +7,7 @@ from pathlib import PurePosixPath
 from src.control.contract import digest
 
 MAX_PACKAGE_BYTES = 128_000
-MOCK_SYMBOLS = {"AAPL", "MSFT"}
+MAX_UNIVERSE_SIZE = 200
 
 
 def validate_files(files):
@@ -32,7 +32,6 @@ def validate_package(package):
     if (
         not isinstance(package["strategy_id"], str)
         or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", package["strategy_id"])
-        or package["strategy_id"] == "mock-balanced"
         or type(package["version"]) is not int
         or package["version"] < 1
     ):
@@ -78,18 +77,22 @@ def validate_package(package):
     )
     if (
         not isinstance(universe, list)
-        or not universe
+        or not 1 <= len(universe) <= MAX_UNIVERSE_SIZE
         or any(
-            not isinstance(symbol, str) or symbol not in MOCK_SYMBOLS
+            not isinstance(symbol, str)
+            or not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,11}", symbol)
             for symbol in universe
         )
         or len(universe) != len(set(universe))
     ):
         raise ValueError(
-            "Mock strategies require a literal universe using AAPL and/or MSFT"
+            "Strategies require 1-200 unique uppercase stock ticker symbols"
         )
     return {
         "strategy_id": package["strategy_id"],
         "version": package["version"],
         "source_digest": digest(package),
-    }, {"class_name": classes[0].name, "universe": universe}
+    }, {
+        "class_name": classes[0].name,
+        "universe": universe,
+    }

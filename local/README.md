@@ -1,16 +1,59 @@
-# Mock execution and dashboard strategies
+# Local development with Alpaca
 
-The stack uses one fake account, two broker contexts, the installed `mock-balanced`
-strategy plus explicitly registered saved dashboard strategies, authenticated HTTP sync, PostgreSQL runtime records and a mock dashboard
-backend running the same control handlers as the AWS Lambda. The mock backend uses
-SQLite to substitute for DynamoDB locally; the integration suite also verifies the
-DynamoDB transaction adapter with Moto. No Alpaca credentials are needed or read.
+This stack connects to the real Alpaca Trading and Market Data APIs. Paper trading
+is the default; `ALPACA_PAPER` selects which account mode to use. The local
+dashboard still substitutes SQLite for DynamoDB and provides local login and
+readiness checks. No AWS deployment is needed.
+
+
+Note: This local dir can be removed once real AWS services replace this mock local substitution (and remove COPY local/ ./local/ from the Dockerfile).
+
+## Start
 
 From `hqg-engine`:
 
 ```sh
-docker compose -p hqg-mvp -f compose.mock.yaml up -d --build
+# For a new setup only (keep an existing .env):
+cp .env.example .env
+# Edit .env: set ALPACA_API_KEY, ALPACA_SECRET_KEY, and ALPACA_PAPER=true.
+# Also set POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, and DATABASE_URL.
+# DATABASE_URL must address the Compose database at host db, port 5432.
+docker network create hqg_network # Only if it does not already exist.
+docker compose up -d --build
 ```
+
+The original `db` service, `postgres_data` volume, database environment variables,
+health checks, restart policies, and build/runtime proxy settings are retained.
+`DATABASE_URL` must match the PostgreSQL username, password, and database, for
+example `postgresql+asyncpg://hqg:development-password@db:5432/hqg`. Changing
+PostgreSQL environment variables does not reset a database already in the volume.
+The engine worker uses an internal control network; the provider also connects to
+the existing `hqg_network` for database and Alpaca access.
+
+Use **Trading API paper keys** from your Alpaca dashboard. The provider sends them
+to `https://paper-api.alpaca.markets`; data comes from `https://data.alpaca.markets`.
+`ALPACA_DATA_FEED=iex` works with a paper-only account. Use `sip` only if your
+account has that subscription. The provider uses the authenticated account. See Alpaca's
+[authentication](https://docs.alpaca.markets/us/docs/authentication) and
+[paper trading](https://docs.alpaca.markets/us/v1.4.2/docs/paper-trading) documentation.
+
+Compose automatically reads `.env`. If it already exists, add the settings from
+`.env.example` without overwriting your other values. The credentials are
+`ALPACA_API_KEY` and `ALPACA_SECRET_KEY`. Set `ALPACA_PAPER=true` for Paper or
+`ALPACA_PAPER=false` for Live, using the corresponding account's keys. An unset or
+blank `ALPACA_PAPER` defaults to Paper; other values are rejected. Only the selected
+mode is configured for a provider run.
+
+The existing Alpaca SDK clients handle trading and market data. Keys go only to
+the provider container; workers read account/market data through its authenticated
+read API. User strategy containers receive no secrets, mounts, Docker socket or
+network. Compose and the sandbox use the `hqg-engine-local` image tag; rebuild
+with `--build` when changing engine code.
+
+The original `dashboard-api` serves database-backed history. The old `snapshot`
+definition is retained under the `legacy-snapshot` profile and is excluded from
+normal startup because it calls retired provider read endpoints. Migrating that
+job is separate from replacing the Alpaca mock.
 
 From `hqg-dashboard/frontend`:
 
@@ -19,109 +62,105 @@ IS_PROD=0 CORE_API_URL=http://127.0.0.1:8011 \
   npm run dev -- --host 0.0.0.0 --port 5173 --strictPort
 ```
 
-The backend probes the actual frontend at `host.docker.internal:5173` and its own
-account control route before granting permission. Configure `MVP_WEBSITE_URL` if
-the frontend uses another local address. For a fully simulated website (fault
-tests only), use `http://mock-readiness:8014/`.
+Keep the frontend running. The backend checks it at
+`host.docker.internal:5173` and checks its own control route before granting
+execution permission. Set `LOCAL_WEBSITE_URL` for a different frontend address.
+For a backend-only readiness fixture, set
+`LOCAL_WEBSITE_URL=http://mock-readiness:8014/`.
 
-Create a **fake local login**, then open <http://localhost:5173/engine>:
+Sign in as the local operator (or POST `{"actor":"operator"}` to
+`http://127.0.0.1:8011/test/login` from your browser), then:
 
-```sh
-curl -X POST http://localhost:5173/api/test/login \
-  -H 'Content-Type: application/json' -d '{"actor":"operator"}'
-```
+1. Create/copy a strategy in the dashboard and save its Python files.
+2. On the Engine page, register the saved version and wait for its acknowledgement.
+3. Set its paper allocation and apply the configuration. Leave Live disabled.
+4. Resume paper trading. Stop closes the gate and reconciles engine-owned orders;
+   it retains positions.
 
-Curl does not install browser cookies. In the browser console on localhost:5173,
-run this once and then reload:
+There is no built-in execution strategy. The editable balanced template is a
+normal saved package and requires registration like any other user strategy.
+Universes support 1–200 unique uppercase stock tickers, including ETFs and class
+symbols such as `SPY`, `IEF`, and `BRK.B`. The account and feed must support those
+symbols. Packages remain immutable and execute in isolated Docker containers.
 
-```js
-await fetch('/api/test/login', {
-  method: 'POST', headers: {'Content-Type': 'application/json'},
-  body: JSON.stringify({actor: 'operator'})
-});
-location.href = '/engine';
-```
+## Strategy data and execution
 
-`operator` can configure/resume both modes; `paper-operator` can resume only paper.
-These login and fault routes exist only in the local mock server. The AWS routes
-use the existing browser authorizer and account permissions.
+The worker keeps its existing five-second cycle. Each enabled strategy receives
+Alpaca's latest minute OHLCV bars and the current portfolio. Prices for sizing
+orders come from real quotes. Declared daily/weekly/monthly/quarterly cadence is
+not scheduled in this patch; the same bar may be supplied on successive cycles.
 
-1. Wait for connected, reconciled paused status.
-2. Select strategies/versions and allocations for paper and optionally live, then
-   click **Configure selected strategies**. The built-in strategy is selected by default.
-3. Wait for the configuration to be applied; Start / Resume each enabled mode.
-4. Stop a mode or Stop All. The action stays pending until a later sync reports
-   that the provider gate applied the version. Cleanup remains separately visible.
-5. Stop the frontend or mock backend to exercise the health interlock. Reopening
-   it restores reporting; use a new Resume for each mode to restore execution.
+The engine starts the isolated strategy container, calls `on_data()`, and receives
+target weights, Hold, or Liquidate. Containers stay running between calls to
+preserve strategy state. Resource limits, timeouts, package validation, and
+Stop/Resume controls remain in effect.
 
-To run your own code, create a dashboard strategy from **Mock balanced template**,
-edit/save its Code tab, then register the saved version on **Engine** while both
-modes are stopped and reconciled. Select that registered version and its allocation
-before configuring/resuming. See the [milestone 2 guide](../../ENGINE_DASHBOARD_MILESTONE_2_FILE_SUMMARY.md)
-for examples, version pinning, supported input and isolation details.
-The mock worker alone mounts the Docker socket; strategy containers have no socket,
-host mounts, credentials or network. Rebuild the image when upgrading this workflow.
+Alpaca fills asynchronously; pending orders prevent another rebalance. The
+provider rechecks execution permission immediately before transmitting an order,
+and does not automatically resubmit orders with uncertain outcomes. Missing or
+invalid data and strategy errors pause execution. Orders submitted outside market
+hours follow Alpaca's order handling; market-aware scheduling is deferred.
 
-The broker fixtures and balances are separate even when both modes run. Its
-Alpaca-shaped request logs are available only inside the isolated mock network:
+For optional real-money execution, replace `ALPACA_API_KEY` and
+`ALPACA_SECRET_KEY` with your live account's keys and set `ALPACA_PAPER=false`,
+then follow the provider replacement steps below. Disable Paper, configure Live,
+and resume Live explicitly in the dashboard. Enabling the unconfigured mode fails
+closed.
 
-```sh
-docker compose -p hqg-mvp -f compose.mock.yaml exec mock-dashboard \
-  python -c 'import httpx; print(httpx.get("http://mock-broker:8012/test/paper/requests", trust_env=False).json())'
-```
+## Restart or rebuild
 
-Provider or worker restart closes both gates. A new worker session needs explicit
-Resume. The dashboard refuses a replacement provider boot until manually
-re-authorized; it never automatically replaces a running owner. To replace it:
+A new provider boot must be authorized after the old owner stops; a worker restart
+also requires Resume. To replace a provider after changing engine code:
 
 ```sh
-docker compose -p hqg-mvp -f compose.mock.yaml stop engine provider-api
+docker compose stop engine provider-api
 # Wait at least 15 seconds after the old provider's last sync.
-docker compose -p hqg-mvp -f compose.mock.yaml exec mock-dashboard python -m local.authorize_boot
-docker compose -p hqg-mvp -f compose.mock.yaml up -d provider-api engine
+docker compose build
+docker compose up -d mock-dashboard
+docker compose exec mock-dashboard python -m local.authorize_boot
+docker compose up -d provider-api engine
 ```
 
-Configuration and action/audit records remain in the dashboard volume. Permission
-is never restored from storage. PostgreSQL stores account/mode portfolio mapping,
-configuration, incidents, order IDs/outcomes, allocations and daily equity. The
-legacy numeric portfolio 1 is labeled paper when mapped, preserving its history.
-Legacy Stop/Resume/Liquidate and provider execution routes return 410.
+Configuration, packages and portfolio/order history remain in the local volumes;
+both modes need Resume. This command also clears any previously stored local
+image-ID requirement.
 
-Stop services without deleting either database:
+The former `compose.mock.yaml` stack is replaced by `compose.yaml`, which keeps
+the original Compose project naming and `postgres_data` volume. Fake broker orders, account IDs, and
+built-in strategy approvals are not suitable for reuse with a real account. Stop
+the old stack before starting this one to free port 8011:
 
 ```sh
-docker compose -p hqg-mvp -f compose.mock.yaml down
+docker stop hqg-mvp-engine-1 hqg-mvp-provider-api-1 hqg-mvp-mock-dashboard-1 hqg-mvp-mock-broker-1 hqg-mvp-mock-readiness-1 hqg-mvp-mock-db-1
 ```
 
-## Acceptance checks
+This retains the old volumes and saved artifacts. Copy any old strategy files you
+need into the new dashboard and register them again.
 
-Use a dedicated disposable PostgreSQL database: the integration tests recreate
-its tables. Both repositories must be present as siblings.
+Stop the new stack without deleting databases:
+
+```sh
+docker compose down
+```
+
+## Tests
+
+The fake Alpaca server now exists only in `tests/integration/broker_fixture.py`.
+Tests deny external network access and never read real Alpaca credentials. Use a
+**dedicated disposable PostgreSQL database**: integration tests recreate its tables.
+Both repositories must be present as siblings.
 
 ```sh
 .venv/bin/pip install -r requirements-test.txt
-docker build -t hqg-engine-m2-test .
-MVP_TEST_DATABASE_URL=postgresql+asyncpg://mvp:FAKE-db-password@127.0.0.1:55432/mvp \
-STRATEGY_SANDBOX_IMAGE=hqg-engine-m2-test \
-  .venv/bin/python -m pytest tests
+docker build -t hqg-engine-alpaca-test .
+docker run -d --name hqg-alpaca-test-db -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test \
+  -e POSTGRES_DB=hqg_test -p 127.0.0.1:55433:5432 postgres:18
+MVP_TEST_DATABASE_URL=postgresql+asyncpg://test:test@127.0.0.1:55433/hqg_test \
+STRATEGY_SANDBOX_IMAGE=hqg-engine-alpaca-test .venv/bin/python -m pytest tests
+# After testing:
+docker rm -f hqg-alpaca-test-db
 ```
 
-The suite starts real loopback HTTP dashboard, provider, trading and quote servers.
-It denies external DNS/socket destinations, disables proxies/redirects and rejects
-missing or nonlocal mock URLs. The integration scenarios, alongside existing engine checks, cover authorization, immutable strategy
-versions, transactional/idempotent control, mode isolation, pending Stop,
-backend/control/website failures, delayed/malformed/stale sync, watchdog expiry
-between child orders, cancellation failures/fills, explicit recovery, restart and
-database failure, and reconciliation after a timeout following broker acceptance.
-All fixtures use `FAKE-*` credentials. Real broker transport deliberately fails
-startup in this milestone.
-
-AWS definitions are in `hqg-dashboard/infra/accounts.tf`; they are not applied by
-local startup. Provision the account state manually with its UUID, engine identity,
-allowed users, approved strategy manifest/image digest and hashed sync secret.
-The readiness URL must traverse the platform control route, which calls the same
-account store/authentication dependency. Defaults deny permission until configured.
-Real broker identity provisioning and TLS engine transport belong to milestones 3/4.
-Dashboard strategy registration is enabled only by the local mock service; AWS
-artifact packaging/registration has not been provisioned or deployed.
+The local AWS substitutes and their login/fault routes remain for development.
+AWS strategy artifact packaging/registration is still not deployed; this change
+makes the local dashboard-controlled workflow use Alpaca.

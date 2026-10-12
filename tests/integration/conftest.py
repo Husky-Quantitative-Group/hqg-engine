@@ -17,14 +17,26 @@ sys.path.insert(0, str(ROOT / "hqg-dashboard/local"))
 
 from server import LocalStore, create_app as dashboard_app
 from control import new_account
-from src.control.contract import APPROVED, IMAGE_DIGEST
+from src.control.packages import validate_package
 from src.control.provider import Provider
 from src.control.runtime import Runtime
-from src.control.transport import Broker
+from broker_fixture import Broker
 from src.db.models import Base
 from src.provider_instance.server import create_app as provider_app
-from local.broker import create_app as broker_app
+from broker_fixture import create_app as broker_app
 from local.readiness import create_app as readiness_app
+
+PACKAGE = {
+    "strategy_id": "test-balanced", "version": 1, "entrypoint": "main.py",
+    "files": {"main.py": """from hqg_algorithms import Strategy, TargetWeights
+class Balanced(Strategy):
+    universe = ["AAPL", "MSFT"]
+    def on_data(self, data, portfolio):
+        return TargetWeights({"AAPL": 0.4, "MSFT": 0.4})
+"""},
+}
+APPROVED = [validate_package(PACKAGE)[0]]
+IMAGE_DIGEST = None
 
 ACCOUNT = "00000000-0000-4000-8000-000000000001"
 ENGINE = "00000000-0000-4000-8000-000000000002"
@@ -127,6 +139,8 @@ class Harness:
             IMAGE_DIGEST,
             SECRET,
         )
+        self.store.provision(account)
+        self.store.commit(ACCOUNT, 0, account, {"package#" + APPROVED[0]["source_digest"]: PACKAGE})
         self.dashboard_app = dashboard_app(
             self.store, account, readiness.url + "/control", readiness.url + "/"
         )
@@ -221,11 +235,11 @@ class Harness:
         return body, response.json()
 
     async def sync_clean(self):
-        assert await self.provider.sync_once()
+        assert await self.provider.sync_once(), self.provider.sync_error
         for mode in ("paper", "live"):
             if not self.provider.modes[mode]["gate_open"]:
                 await self.provider.reconcile(mode)
-        assert await self.provider.sync_once()
+        assert await self.provider.sync_once(), self.provider.sync_error
 
     async def action(self, action, mode=None, incident=None):
         from uuid import uuid4

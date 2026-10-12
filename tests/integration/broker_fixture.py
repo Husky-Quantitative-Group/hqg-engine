@@ -4,6 +4,7 @@ import asyncio
 from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
+from src.control.transport import local_client
 
 
 def create_app():
@@ -59,7 +60,9 @@ def create_app():
         if faults.get("malformed"):
             return Response("broken", media_type="application/json")
         if path == "v2/account" and method == "GET":
-            return {"id": f"mock-{mode}", "equity": str(context["equity"])}
+            return {"id": "00000000-0000-4000-8000-00000000000" + ("3" if mode == "paper" else "4"), "equity": str(context["equity"]), "cash": str(context["equity"] - sum(q * context["quotes"][s] for s, q in context["positions"].items()))}
+        if path == "v2/stocks/bars/latest" and method == "GET":
+            return {"bars": {symbol: {"o": price - 2, "h": price + 3, "l": price - 4, "c": price, "v": 12345} for symbol, price in context["quotes"].items() if symbol in request.query_params["symbols"].split(",")}}
         if path == "v2/positions" and method == "GET":
             return [
                 {"symbol": s, "qty": str(q)} for s, q in context["positions"].items()
@@ -154,3 +157,37 @@ def fill(context, order, quantity):
 
 
 app = create_app()
+
+
+class Broker:
+    """Explicit test dependency; runtime never accepts a broker URL override."""
+    def __init__(self, mode, trading_url, data_url, timeout=3, read_only=False):
+        self.mode, self.feed, self.account_id = mode, "iex", None
+        headers = {"APCA-API-KEY-ID": f"FAKE-{'READ-' if read_only else ''}{mode}", "APCA-API-SECRET-KEY": "FAKE-SECRET"}
+        self.trading = local_client(trading_url, timeout, headers)
+        self.data = local_client(data_url, timeout, headers)
+
+
+    async def request(self, method, path, *, before_send=None, **kwargs):
+        async def admit(event, _info):
+            if event == "http11.send_request_headers.started" and before_send:
+                before_send()
+        if before_send:
+            kwargs["extensions"] = {"trace": admit}
+        response = await self.trading.request(method, path, **kwargs)
+        response.raise_for_status()
+        return response.json() if response.content else None
+
+    async def quotes(self, symbols):
+        response = await self.data.get("v2/stocks/quotes/latest", params={"symbols": ",".join(symbols)})
+        response.raise_for_status()
+        return {symbol: float(quote["ap"]) for symbol, quote in response.json()["quotes"].items()}
+
+    async def bars(self, symbols):
+        response = await self.data.get("v2/stocks/bars/latest", params={"symbols": ",".join(symbols)})
+        response.raise_for_status()
+        return {symbol: {key: float(bar[short]) for key, short in (("open", "o"), ("high", "h"), ("low", "l"), ("close", "c"), ("volume", "v"))} for symbol, bar in response.json()["bars"].items()}
+
+    async def close(self):
+        await self.trading.aclose()
+        await self.data.aclose()

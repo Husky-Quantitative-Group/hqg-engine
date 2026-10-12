@@ -49,7 +49,7 @@ def test_package_rejects_unsafe_paths(path):
 @pytest.mark.parametrize(
     "source",
     [
-        SOURCE.replace('"AAPL"', '"SPY"'),
+        SOURCE.replace('"AAPL"', '"bad symbol"'),
         SOURCE.replace('["AAPL"]', "get_universe()"),
         SOURCE + SOURCE.replace("Example", "Second"),
         "invalid syntax!",
@@ -75,3 +75,8 @@ def test_package_requires_supported_unambiguous_strategy(source):
 def test_rejects_unsafe_strategy_outputs(weights):
     with pytest.raises(ValueError):
         validate_weights(weights, ["AAPL"])
+
+
+@pytest.mark.parametrize("symbol", ["SPY", "IEF", "NVDA", "BRK.B", "BTC-USD"])
+def test_package_accepts_symbols_beyond_old_fixtures(symbol):
+    assert validate_package(package(SOURCE.replace("AAPL", symbol)))[1]["universe"] == [symbol]

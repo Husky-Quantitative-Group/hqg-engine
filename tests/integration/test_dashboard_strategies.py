@@ -6,9 +6,8 @@ import httpx
 import pytest
 
 from conftest import Harness, ACCOUNT, WORKER_SECRET
-from src.control.contract import APPROVED
+from conftest import APPROVED
 from src.control.sandbox import Sandbox
-from src.control.transport import Broker
 from src.control.worker import Worker
 
 SOURCE = """from hqg_algorithms import Strategy, TargetWeights
@@ -84,15 +83,7 @@ async def configure(h, strategies):
 
 
 def new_worker(h):
-    return Worker(
-        h.provider_server.url,
-        WORKER_SECRET,
-        {
-            m: Broker(m, h.broker.url + "/" + m,
-                      h.broker.url + "/" + m, read_only=True)
-            for m in ("paper", "live")
-        },
-    )
+    return Worker(h.provider_server.url, WORKER_SECRET)
 
 
 async def close_worker(worker):
@@ -260,6 +251,10 @@ class Isolated(Strategy):
             raise ValueError("Network accessible")
     def on_data(self, data, portfolio):
         assert data.close("AAPL") == 100
+        assert data.open("AAPL") == 98
+        assert data.high("AAPL") == 103
+        assert data.low("AAPL") == 96
+        assert data.volume("AAPL") == 12345
         assert portfolio.equity == 10000
         self.cycles += 1
         return TargetWeights({"AAPL": 0.6}) if self.cycles == 1 else Hold() if self.cycles == 2 else Liquidate()
@@ -274,9 +269,9 @@ class Isolated(Strategy):
                  "positions": {}, "weights": {}}
     sandbox = Sandbox(package)
     try:
-        assert sandbox.on_data({"AAPL": 100}, portfolio) == {"AAPL": 0.6}
-        assert sandbox.on_data({"AAPL": 100}, portfolio) is None
-        assert sandbox.on_data({"AAPL": 100}, portfolio) == {}
+        assert sandbox.on_data({"AAPL": {"open": 98, "high": 103, "low": 96, "close": 100, "volume": 12345}}, portfolio) == {"AAPL": 0.6}
+        assert sandbox.on_data({"AAPL": {"open": 98, "high": 103, "low": 96, "close": 100, "volume": 12345}}, portfolio) is None
+        assert sandbox.on_data({"AAPL": {"open": 98, "high": 103, "low": 96, "close": 100, "volume": 12345}}, portfolio) == {}
         sandbox.container.reload()
         config = sandbox.container.attrs
         assert config["HostConfig"]["NetworkMode"] == "none"
@@ -289,7 +284,7 @@ class Isolated(Strategy):
     )
     sandbox = Sandbox(package, timeout=1)
     with pytest.raises(TimeoutError):
-        sandbox.on_data({"AAPL": 100}, portfolio)
+        sandbox.on_data({"AAPL": {"open": 98, "high": 103, "low": 96, "close": 100, "volume": 12345}}, portfolio)
     assert sandbox.container is None
 
 

@@ -33,7 +33,7 @@ class Sandbox:
         self.universe = metadata["universe"]
         self.package, self.timeout = package, timeout
         self.image = image or os.environ.get(
-            "STRATEGY_SANDBOX_IMAGE", "hqg-engine-mock"
+            "STRATEGY_SANDBOX_IMAGE", "hqg-engine-local"
         )
         self.client, self.container, self.stream = None, None, None
         self.buffer = b""
@@ -114,12 +114,12 @@ class Sandbox:
             raise ValueError("Strategy failed: " + str(result["error"])[:500])
         return result
 
-    def on_data(self, prices, portfolio):
+    def on_data(self, bars, portfolio):
         with self.lock:
             try:
                 if self.container is None:
                     self.start()
-                result = self.exchange({"prices": prices, "portfolio": portfolio})
+                result = self.exchange({"bars": bars, "portfolio": portfolio})
                 weights = result["weights"]
                 return (
                     None
