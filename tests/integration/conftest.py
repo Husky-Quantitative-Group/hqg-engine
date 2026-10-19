@@ -13,7 +13,8 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy import text
 
 ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT / "hqg-dashboard/local"))
+sys.path.insert(0, str(ROOT / "hqg-dashboard/tests/fixtures"))
+sys.path.insert(0, str(Path(__file__).parent / "fixtures"))
 
 from server import LocalStore, create_app as dashboard_app
 from control import new_account
@@ -24,7 +25,7 @@ from broker_fixture import Broker
 from src.db.models import Base
 from src.provider_instance.server import create_app as provider_app
 from broker_fixture import create_app as broker_app
-from local.readiness import create_app as readiness_app
+from readiness import create_app as readiness_app
 
 PACKAGE = {
     "strategy_id": "test-balanced", "version": 1, "entrypoint": "main.py",

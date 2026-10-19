@@ -1,8 +1,10 @@
 # HQG Execution Engine
 
-Run dashboard-created strategies against real Alpaca paper trading using
-`compose.yaml` and `.env`. The stack includes PostgreSQL, the provider, isolated
-strategy workers, and local AWS substitutes for the dashboard.
+The execution engine uses real Alpaca integration, `compose.yaml` and `.env`.
+The stack includes PostgreSQL, the provider, isolated
+strategy workers. Runtime AWS substitutes, fake login and fake readiness have
+been removed. Real strategy registration/package delivery and provider HTTPS
+transport remain unfinished; this cleanup does not complete AWS integration.
 
 For a new setup, copy `.env.example` to `.env`. If `.env` already exists, add the
 settings from the example while keeping your other values. Set `ALPACA_API_KEY`
@@ -17,8 +19,9 @@ docker compose up -d --build
 
 Compose reads `.env` automatically. Rebuild with `--build` after engine changes.
 
-Follow [local/README.md](local/README.md) for frontend startup, strategy
-registration, Stop/Resume controls, restarts, and tests.
+Set the account/engine UUIDs, dashboard service URL and distinct dashboard/worker
+secrets listed in `.env.example`; Compose requires them and passes dashboard
+credentials only to the provider. Use the dashboard's real CAS/JWT login.
 
 ```sh
 docker compose ps

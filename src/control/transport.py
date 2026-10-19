@@ -56,7 +56,7 @@ def local_client(url, timeout=3, headers=None):
     if (
         parsed.scheme != "http"
         or parsed.hostname
-        not in {"127.0.0.1", "::1", "mock-dashboard", "mock-readiness", "provider-api"}
+        not in {"127.0.0.1", "::1", "provider-api"}
         or not parsed.port
         or parsed.username
         or parsed.password

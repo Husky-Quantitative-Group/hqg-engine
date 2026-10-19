@@ -1,3 +1,5 @@
+"""Test-only readiness responses and failure injection."""
+
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
@@ -28,5 +30,3 @@ def create_app():
 
     return app
 
-
-app = create_app()

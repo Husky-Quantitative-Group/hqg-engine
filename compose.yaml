@@ -1,9 +1,7 @@
 x-control-environment: &control-environment
-  HQG_ACCOUNT_ID: 00000000-0000-4000-8000-000000000001
-  HQG_ENGINE_ID: 00000000-0000-4000-8000-000000000002
-  DASHBOARD_SYNC_SECRET: local-development-sync-secret
-  PROVIDER_WORKER_SECRET: local-development-worker-secret
-  DASHBOARD_SYNC_URL: http://mock-dashboard:8011
+  HQG_ACCOUNT_ID: ${HQG_ACCOUNT_ID:?Set the account UUID}
+  HQG_ENGINE_ID: ${HQG_ENGINE_ID:?Set the engine UUID}
+  PROVIDER_WORKER_SECRET: ${PROVIDER_WORKER_SECRET:?Set a worker credential}
 
 services:
   db:
@@ -46,7 +44,7 @@ services:
       - hqg_network
 
   provider-api:
-    build: &engine-build
+    build:
       context: .
       dockerfile: Dockerfile
       args:
@@ -62,10 +60,10 @@ services:
         condition: service_completed_successfully
       db:
         condition: service_healthy
-      mock-dashboard:
-        condition: service_started
     environment:
       <<: *control-environment
+      DASHBOARD_SYNC_SECRET: ${DASHBOARD_SYNC_SECRET:?Set the account service credential}
+      DASHBOARD_SYNC_URL: ${DASHBOARD_SYNC_URL:?Set the dashboard control URL}
       DATABASE_URL: ${DATABASE_URL}
       NO_PROXY: ${NO_PROXY}
       no_proxy: ${no_proxy}
@@ -206,35 +204,8 @@ services:
     networks:
       - control
 
-  mock-readiness:
-    build: *engine-build
-    command: python3 -m uvicorn local.readiness:app --host 0.0.0.0 --port 8014
-    restart: unless-stopped
-    networks:
-      - control
-
-  mock-dashboard:
-    build: *engine-build
-    volumes:
-      - ../hqg-dashboard:/dashboard:ro
-      - dashboard_data:/state
-    environment:
-      <<: *control-environment
-      PYTHONPATH: /app:/dashboard/local
-      MOCK_DASHBOARD_DB: /state/dashboard.db
-      CONTROL_READINESS_URL: http://mock-dashboard:8011/control
-      WEBSITE_READINESS_URL: ${LOCAL_WEBSITE_URL:-http://host.docker.internal:5173/}
-    extra_hosts: ["host.docker.internal:host-gateway"]
-    ports: ["127.0.0.1:8011:8011"]
-    command: python3 -m uvicorn server:from_environment --factory --host 0.0.0.0 --port 8011
-    restart: unless-stopped
-    networks:
-      - hqg_network
-      - control
-
 volumes:
   postgres_data:
-  dashboard_data:
 
 networks:
   hqg_network:
