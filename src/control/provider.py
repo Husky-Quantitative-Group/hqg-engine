@@ -16,7 +16,7 @@ from src.control.contract import (
     digest,
     validate_configuration,
 )
-from src.control.transport import local_client
+from src.control.transport import dashboard_client
 from src.control.packages import validate_package
 
 TERMINAL = {"filled", "canceled", "expired", "rejected"}
@@ -34,6 +34,7 @@ class Provider:
         interval=5,
         timeout=3,
         ttl=15,
+        dashboard=None,
     ):
         self.account_id, self.engine_id = str(UUID(account_id)), str(UUID(engine_id))
         if (
@@ -47,7 +48,7 @@ class Provider:
 
         self.secret, self.brokers, self.runtime = secret, brokers, runtime
         self.interval, self.timeout, self.max_ttl = interval, timeout, ttl
-        self.dashboard = local_client(
+        self.dashboard = dashboard if dashboard is not None else dashboard_client(
             dashboard_url, timeout, {"Authorization": "Bearer " + secret}
         )
         self.boot_id, self.worker_session = str(uuid4()), None
@@ -55,6 +56,7 @@ class Provider:
         self.contexts_verified, self.sync_error = False, None
         self.version, self.revision, self.configuration = 0, 0, None
         self.packages, self.approved = {}, []
+        self.package_cache = {}
         self.modes = {
             m: {
                 "state": "unconfigured",
@@ -227,22 +229,38 @@ class Provider:
                     elif desired["resume_incident_id"] is not None:
                         raise ValueError("Paused mode cannot carry Resume permission")
 
-                packages = data.get("strategy_packages", {})
-                if not isinstance(packages, dict) or len(packages) > 32:
-                    raise ValueError("Invalid registered packages")
-                approved = []
-                for source_digest, package in packages.items():
-                    identity, _ = validate_package(package)
-                    if identity["source_digest"] != source_digest:
-                        raise ValueError("Strategy package digest mismatch")
-                    if (
-                        source_digest in self.packages
-                        and self.packages[source_digest] != package
-                    ):
-                        raise ValueError("Installed package changed")
-                    approved.append(identity)
+                approved = data["approved_strategies"]
+                if (
+                    not isinstance(approved, list) or len(approved) > 32
+                    or len({digest(item) for item in approved}) != len(approved)
+                ):
+                    raise ValueError("Invalid approved strategies")
                 if any(item not in approved for item in self.approved):
                     raise ValueError("Installed strategy removed")
+                packages = {}
+                for identity in approved:
+                    if set(identity) != {"strategy_id", "version", "source_digest"}:
+                        raise ValueError("Invalid approved identity")
+                    source_digest = identity["source_digest"]
+                    package = self.package_cache.get(source_digest)
+                    if package is None:
+                        remaining = sent + min(ttl, self.timeout) - time.monotonic()
+                        if remaining <= 0:
+                            raise ValueError("Package download deadline exceeded")
+                        async with asyncio.timeout(remaining):
+                            response = await self.dashboard.get(
+                                f"internal/v1/accounts/{self.account_id}/strategy-packages/{source_digest}"
+                            )
+                            response.raise_for_status()
+                            package = response.json()
+                        if validate_package(package)[0] != identity:
+                            raise ValueError("Strategy package digest mismatch")
+                        self.package_cache[source_digest] = package
+                    elif validate_package(package)[0] != identity:
+                        raise ValueError("Strategy package digest mismatch")
+                    packages[source_digest] = package
+                if time.monotonic() >= sent + min(ttl, self.timeout):
+                    raise ValueError("Package download deadline exceeded")
 
                 config = data["configuration"]
                 if config is not None:

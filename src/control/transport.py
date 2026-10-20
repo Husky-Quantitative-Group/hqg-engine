@@ -51,6 +51,18 @@ def bound_client(url, timeout=3, headers=None):
     )
 
 
+def dashboard_client(url, timeout=3, headers=None):
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "https" or not parsed.hostname or parsed.username
+        or parsed.password or parsed.query or parsed.fragment
+    ):
+        raise ValueError(
+            "An HTTPS dashboard URL without credentials, query or fragment is required"
+        )
+    return bound_client(url, timeout, headers)
+
+
 def local_client(url, timeout=3, headers=None):
     parsed = urlsplit(url)
     if (

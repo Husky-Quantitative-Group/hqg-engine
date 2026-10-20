@@ -1,13 +1,21 @@
-"""Immutable dashboard packages. Validation never executes uploaded code."""
+"""Strategy package validation. Never executes uploaded code."""
+
+# TODO: Move the engine/dashboard copies into hqg-algorithms in a later change.
 
 import ast
+import hashlib
+import json
 import re
 from pathlib import PurePosixPath
 
-from src.control.contract import digest
-
 MAX_PACKAGE_BYTES = 128_000
 MAX_UNIVERSE_SIZE = 200
+
+
+def digest(value):
+    return "sha256:" + hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    ).hexdigest()
 
 
 def validate_files(files):
