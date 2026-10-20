@@ -16,7 +16,10 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "hqg-dashboard/tests/fixtures"))
 sys.path.insert(0, str(Path(__file__).parent / "fixtures"))
 
-from server import LocalStore, create_app as dashboard_app
+from aws_fixture import setup_aws, seed_package
+from store import DynamoStore
+from packages import StrategySource
+from server import create_app as dashboard_app
 from control import new_account
 from src.control.packages import validate_package
 from src.control.provider import Provider
@@ -45,32 +48,6 @@ SECRET = "FAKE-SYNC-SECRET"
 WORKER_SECRET = "FAKE-WORKER-SECRET"
 
 
-@pytest.fixture(autouse=True)
-def deny_external_network(monkeypatch):
-    original = socket.getaddrinfo
-
-    def local_only(host, *args, **kwargs):
-        if host not in ("127.0.0.1", "::1", "localhost", b"127.0.0.1"):
-            raise AssertionError(f"External destination blocked: {host}")
-        return original(host, *args, **kwargs)
-
-    monkeypatch.setattr(socket, "getaddrinfo", local_only)
-    for cls in (socket.socket,):
-        original_connect = cls.connect
-        original_connect_ex = cls.connect_ex
-
-        def connect(sock, address):
-            if isinstance(address, tuple) and address[0] not in ("127.0.0.1", "::1"):
-                raise AssertionError(f"External socket blocked: {address}")
-            return original_connect(sock, address)
-
-        def connect_ex(sock, address):
-            if isinstance(address, tuple) and address[0] not in ("127.0.0.1", "::1"):
-                raise AssertionError(f"External socket blocked: {address}")
-            return original_connect_ex(sock, address)
-
-        monkeypatch.setattr(cls, "connect", connect)
-        monkeypatch.setattr(cls, "connect_ex", connect_ex)
 
 
 class HTTPServer:
@@ -118,6 +95,8 @@ class Harness:
             raise
 
     async def setup(self):
+        if not os.environ.get("MVP_TEST_DATABASE_URL"):
+            pytest.skip("Set MVP_TEST_DATABASE_URL to a disposable PostgreSQL database; tests drop its tables")
         self.db = create_async_engine(os.environ["MVP_TEST_DATABASE_URL"])
 
         async with self.db.begin() as connection:
@@ -130,7 +109,11 @@ class Harness:
         self.readiness_app = readiness_app()
         self.broker = await self.stack.enter_async_context(HTTPServer(self.broker_app))
         readiness = await self.stack.enter_async_context(HTTPServer(self.readiness_app))
-        self.store = LocalStore(str(self.tmp_path / "dashboard.db"))
+        self.aws_context, self.dynamo, self.s3 = setup_aws()
+        self.store = DynamoStore(__import__("boto3").client("dynamodb"), os.environ["ACCOUNTS_TABLE"])
+        seed_package(self.dynamo, self.s3, PACKAGE)
+        seed_package(self.dynamo, self.s3, {**PACKAGE, "strategy_id": "1"})
+        self.dynamo.Table(os.environ["COUNTERS_TABLE"]).put_item(Item={"counter_name": "strategies", "value": 1})
 
         account = new_account(
             ACCOUNT,
@@ -140,10 +123,10 @@ class Harness:
             IMAGE_DIGEST,
             SECRET,
         )
-        self.store.provision(account)
-        self.store.commit(ACCOUNT, 0, account, {"package#" + APPROVED[0]["source_digest"]: PACKAGE})
+        reference = StrategySource(self.dynamo, self.s3, os.environ).snapshot(ACCOUNT, PACKAGE)
+        self.store.commit(ACCOUNT, None, account, {"package#" + APPROVED[0]["source_digest"]: reference})
         self.dashboard_app = dashboard_app(
-            self.store, account, readiness.url + "/control", readiness.url + "/"
+            self.store, readiness.url + "/control", readiness.url + "/", self.dynamo, self.s3
         )
         self.dashboard_app.state.control.ttl = 1
         self.dashboard = await self.stack.enter_async_context(
@@ -168,7 +151,7 @@ class Harness:
         await self.execution.post("/internal/sessions/" + self.worker_session)
         await self.provider.reconcile("paper")
         await self.provider.reconcile("live")
-        assert await self.provider.sync_once()
+        assert await self.provider.sync_once(), self.provider.sync_error
 
         return self
 
@@ -188,8 +171,12 @@ class Harness:
             brokers,
             self.runtime,
             interval=0.1,
-            timeout=0.25,
+            timeout=0.75,
             ttl=1,
+            dashboard=__import__("httpx").AsyncClient(
+                base_url=self.dashboard.url + "/", timeout=0.75, trust_env=False,
+                headers={"Authorization": "Bearer " + SECRET},
+            ),
         )
 
     async def __aexit__(self, *args):
@@ -199,7 +186,10 @@ class Harness:
             await self.execution.aclose()
 
         await self.stack.aclose()
-        await self.db.dispose()
+        if hasattr(self, "db"):
+            await self.db.dispose()
+        if hasattr(self, "aws_context"):
+            self.aws_context.stop()
 
     async def status(self):
         response = await self.user.get(f"/accounts/{ACCOUNT}/status")

@@ -176,7 +176,7 @@ def test_health_failure_closes_both_modes_and_requires_incident_resume(
             elif failure in ("control", "website", "generic_health"):
                 h.readiness_app.state.faults[failure] = True
             elif failure == "delay":
-                h.dashboard_app.state.faults["delay"] = 0.4
+                h.dashboard_app.state.faults["delay"] = 1
             elif failure == "unauthorized":
                 h.provider.dashboard.headers["authorization"] = "Bearer FAKE-WRONG"
             else:
@@ -430,7 +430,7 @@ def test_dynamodb_atomic_configuration_audit_and_idempotency(tmp_path):
                     TableName="accounts",
                     Item={
                         **store.key(ACCOUNT, "package#" + APPROVED[0]["source_digest"]),
-                        "body": {"S": json.dumps(PACKAGE)},
+                        "body": {"S": json.dumps(h.store.get(ACCOUNT, "package#" + APPROVED[0]["source_digest"]))},
                     },
                 )
                 h.store = store
@@ -470,7 +470,7 @@ def test_disabled_live_and_account_service_authentication(tmp_path):
             _, response = await h.action("resume", "live")
             assert response.status_code == 409
             assert (await h.order("live")).status_code == 409
-            h.user.cookies.set("mock_operator", "paper-operator")
+            h.user.cookies.set("test_actor", "paper-operator")
             # The live grant is checked before mode enablement and no action is written.
             _, response = await h.action("resume", "live")
             assert response.status_code == 403

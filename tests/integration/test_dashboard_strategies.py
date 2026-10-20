@@ -34,7 +34,7 @@ async def saved_strategy(h, source=SOURCE):
             "readme_content": "# Custom",
         },
     )
-    assert response.status_code == 200, response.text
+    assert response.status_code == 201, response.text
     metadata = response.json()
     response = await h.user.post(
         f"/strategies/{metadata['id']}/artifacts",
@@ -99,7 +99,7 @@ def test_registration_permissions_pinning_retries_and_pause(tmp_path):
             async with httpx.AsyncClient(
                 base_url=h.dashboard.url, trust_env=False
             ) as stranger:
-                assert (await stranger.get("/strategies")).status_code == 403
+                assert (await stranger.get("/strategies")).status_code == 401
                 assert (
                     await stranger.post(f"/accounts/{ACCOUNT}/strategies", json={})
                 ).status_code == 403
@@ -113,7 +113,7 @@ def test_registration_permissions_pinning_retries_and_pause(tmp_path):
             identity = (await h.status())["approved_strategies"][-1]
             installed = h.store.get(
                 ACCOUNT, "package#" + identity["source_digest"])
-            assert installed["files"]["helper.py"] == "TARGET = 0.6"
+            assert h.dashboard_app.state.control.download(ACCOUNT, h.provider.secret, identity["source_digest"])["files"]["helper.py"] == "TARGET = 0.6"
             assert (
                 await h.user.post(
                     f"/strategies/{strategy_id}/artifacts",
@@ -128,7 +128,7 @@ def test_registration_permissions_pinning_retries_and_pause(tmp_path):
                 )
             ).json()["version"] == 3
             assert (
-                h.dashboard_app.state.control.strategy_source(strategy_id, 3)["files"][
+                h.dashboard_app.state.control.strategy_source.resolve(strategy_id, 3, "operator", ["FUND"])["files"][
                     "helper.py"
                 ]
                 == "TARGET = 0.6"
@@ -153,17 +153,16 @@ def test_registration_permissions_pinning_retries_and_pause(tmp_path):
                 == 2
             )
             # Tampered package content fails closed before being installed.
-            original_post = h.provider.dashboard.post
+            original_get = h.provider.dashboard.get
+            h.provider.package_cache.clear()
 
             async def tampered(*args, **kwargs):
-                result = await original_post(*args, **kwargs)
+                result = await original_get(*args, **kwargs)
                 data = result.json()
-                data["strategy_packages"][identity["source_digest"]]["files"][
-                    "main.py"
-                ] += "\n# tampered"
+                data["files"]["main.py"] += "\n# tampered"
                 return httpx.Response(200, json=data, request=result.request)
 
-            h.provider.dashboard.post = tampered
+            h.provider.dashboard.get = tampered
             assert not await h.provider.sync_once()
             assert "digest mismatch" in h.provider.sync_error
 
