@@ -1,2 +1,2 @@
 -r requirements.txt
-moto[dynamodb]==5.2.2
+moto[dynamodb,s3]==5.2.2
