@@ -653,3 +653,69 @@ def test_sdk_order_errors_preserve_reconciliation_status(tmp_path, monkeypatch, 
                 await broker.close()
 
     run(scenario())
+
+
+@pytest.mark.parametrize("submission_started", [False, True])
+def test_sdk_transport_failure_recovery_requires_proof_of_non_submission(
+    tmp_path, monkeypatch, submission_started
+):
+    import requests
+    from urllib3.connection import HTTPSConnection
+    from src.control.transport import AdmissionPool, Broker
+
+    if submission_started:
+        monkeypatch.setattr(AdmissionPool, "_validate_conn", lambda *args: None)
+
+        def write(self, *args, **kwargs):
+            raise requests.ReadTimeout("Injected failure after admission")
+
+        monkeypatch.setattr(HTTPSConnection, "request", write)
+    else:
+        def connect(self):
+            raise ConnectionRefusedError("Injected failure before submission")
+
+        monkeypatch.setattr(HTTPSConnection, "connect", connect)
+
+    async def scenario():
+        async with Harness(tmp_path) as h:
+            await h.configure(live=False)
+            await h.resume("paper")
+            previous = h.provider.brokers["paper"]
+            broker = Broker("paper", "test-key", "test-secret")
+            h.provider.brokers["paper"] = broker
+            context, operation = h.context("paper"), str(uuid4())
+            try:
+                with pytest.raises(HTTPException) as failed:
+                    await h.submit("paper", operation)
+                assert failed.value.status_code == 503
+                assert all(not state["gate_open"] for state in h.provider.modes.values())
+            finally:
+                h.provider.brokers["paper"] = previous
+                await broker.close()
+
+            expected = "uncertain" if submission_started else "discarded"
+            records = await h.runtime.orders("paper")
+            assert {record["status"] for record in records.values()} == {expected}
+            if not submission_started:
+                assert next(iter(records.values()))["reason"] == "not_submitted"
+            # The restored fixture has no such order: its client-ID lookup returns 404.
+            for _ in range(2):
+                await h.sync_clean()
+                assert h.provider.modes["paper"]["reconciled"] is not submission_started
+                assert not h.provider.modes["paper"]["gate_open"]
+
+            if submission_started:
+                assert h.provider.modes["paper"]["outstanding_orders"]
+                assert (await h.action("resume", "paper"))[1].status_code == 409
+            else:
+                assert not h.provider.modes["paper"]["outstanding_orders"]
+                assert not any(
+                    request["path"] == "v2/orders:by_client_order_id"
+                    for request in h.broker_app.state.contexts["paper"]["requests"]
+                )
+                await h.resume("paper")
+                with pytest.raises(HTTPException) as stale:
+                    await h.submit("paper", operation, context=context)
+                assert stale.value.status_code == 409
+                assert (await h.submit("paper"))["status"] == "filled"
+    run(scenario())

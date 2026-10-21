@@ -16,7 +16,7 @@ from src.control.contract import (
     digest,
     validate_configuration,
 )
-from src.control.transport import dashboard_client
+from src.control.transport import dashboard_client, OrderNotSubmitted
 from src.control.packages import validate_package
 
 TERMINAL = {"filled", "canceled", "expired", "rejected"}
@@ -455,20 +455,32 @@ class Provider:
                 )
                 raise
             except Exception as exc:
-                if isinstance(exc, (httpx.HTTPStatusError, APIError)) and (
+                not_submitted = isinstance(exc, OrderNotSubmitted)
+                if not_submitted:
+                    await self.runtime.save_order(
+                        mode, client_id,
+                        {"request": payload, "status": "discarded", "reason": "not_submitted"},
+                    )
+                elif isinstance(exc, (httpx.HTTPStatusError, APIError)) and (
                     exc.response.status_code if exc.response is not None else None
                 ) in (400, 401, 403, 422):
                     await self.runtime.save_order(
                         mode, client_id, {"request": payload, "status": "rejected"}
                     )
                 self.healthy = False
-                self.close(MODES, "broker_outcome_uncertain", force=True)
+                self.close(
+                    MODES,
+                    "broker_submission_failed" if not_submitted else "broker_outcome_uncertain",
+                    force=True,
+                )
                 try:
                     await self.persist()
                 except Exception:
                     pass
                 raise HTTPException(
-                    503, "Order outcome uncertain; reconciliation required"
+                    503,
+                    "Order was not submitted; explicit Resume required" if not_submitted
+                    else "Order outcome uncertain; reconciliation required",
                 )
 
     async def rebalance(self, context, operation_id, weights):

@@ -10,9 +10,12 @@ import requests
 from alpaca.common.exceptions import APIError
 from fastapi import HTTPException
 from urllib3.connection import HTTPSConnection
+from urllib3.exceptions import ConnectTimeoutError, SSLError
+from unittest.mock import Mock
 
 from src.control.transport import (
     AdmissionConnection, AdmissionPool, Broker, BrokerReader, brokers_from_environment,
+    OrderNotSubmitted,
 )
 from src.control import transport
 
@@ -209,6 +212,53 @@ def test_sdk_does_not_retry_orders_after_uncertain_response(monkeypatch):
                 await broker.request("POST", "v2/orders", json={"client_order_id": "test-order"})
             assert exc.value.status_code == 504
             assert len(seen) == 1
+        finally:
+            await broker.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", [
+    ConnectionRefusedError("Injected connection refusal"),
+    ConnectTimeoutError("Injected connection timeout"),
+    SSLError("Injected TLS failure"),
+])
+def test_sdk_identifies_order_failures_before_transmission(monkeypatch, failure):
+    def connect(self):
+        raise failure
+
+    monkeypatch.setattr(HTTPSConnection, "connect", connect)
+
+    async def scenario():
+        broker, admit = Broker("paper", "key", "secret"), Mock()
+        try:
+            with pytest.raises(OrderNotSubmitted):
+                await broker.request("POST", "v2/orders", json={}, before_send=admit)
+            admit.assert_not_called()
+            # Read failures remain ordinary transport errors.
+            with pytest.raises(requests.RequestException):
+                await broker.request("GET", "v2/account")
+        finally:
+            await broker.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", [requests.ReadTimeout, requests.ConnectionError])
+def test_sdk_keeps_failures_after_submission_begins_uncertain(monkeypatch, failure):
+    monkeypatch.setattr(AdmissionPool, "_validate_conn", lambda *args: None)
+
+    def write(self, *args, **kwargs):
+        raise failure("Injected failure after admission")
+
+    monkeypatch.setattr(HTTPSConnection, "request", write)
+
+    async def scenario():
+        broker, admit = Broker("paper", "key", "secret"), Mock()
+        try:
+            with pytest.raises(requests.RequestException):
+                await broker.request("POST", "v2/orders", json={}, before_send=admit)
+            admit.assert_called_once_with()
         finally:
             await broker.close()
 

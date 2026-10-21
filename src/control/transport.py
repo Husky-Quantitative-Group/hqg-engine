@@ -11,6 +11,7 @@ from uuid import UUID
 
 import httpx
 from requests.adapters import HTTPAdapter
+from requests.exceptions import RequestException
 from urllib3.connection import HTTPSConnection
 from urllib3.connectionpool import HTTPSConnectionPool
 from alpaca.data.requests import StockLatestQuoteRequest, StockBarsRequest
@@ -89,6 +90,10 @@ def local_client(url, timeout=3, headers=None):
 _BEFORE_SEND = ContextVar("alpaca_before_send", default=None)
 
 
+class OrderNotSubmitted(Exception):
+    """The transport failed before an order request could start transmission."""
+
+
 class AdmissionConnection(HTTPSConnection):
     def request(self, *args, **kwargs):
         guard = _BEFORE_SEND.get()
@@ -147,9 +152,13 @@ class Broker:
 
     async def call(self, function, *args, before_send=None):
         loop = asyncio.get_running_loop()
+        submission_started = False
 
         async def admit():
+            nonlocal submission_started
             before_send()
+            # From this point onward, any transport failure is uncertain.
+            submission_started = True
 
         def invoke():
             guard = (
@@ -159,6 +168,10 @@ class Broker:
                 token = _BEFORE_SEND.set(guard)
                 try:
                     return function(*args)
+                except RequestException as exc:
+                    if before_send is not None and not submission_started and exc.response is None:
+                        raise OrderNotSubmitted("Order failed before HTTP transmission") from exc
+                    raise
                 finally:
                     _BEFORE_SEND.reset(token)
 
