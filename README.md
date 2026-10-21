@@ -1,108 +1,65 @@
 # HQG Execution Engine
 
-This serves as a containerized trading execution system, including a trading engine, worker to capture past metrics, and a FastAPI server for an external dashboard.
+The execution engine uses real Alpaca integration, `compose.yaml` and `.env`.
+The stack includes PostgreSQL, the provider, isolated
+strategy workers. Runtime AWS substitutes, fake login and fake readiness have
+been removed. Registration and pinned package delivery use the dashboard AWS
+backend over HTTPS. An AWS account and deployed dashboard are required for
+interactive development; see [dashboard setup](../hqg-dashboard/docs/local_setup.md).
 
-Docker is the recommended way to run the full application in a production environment. This runs all services: PostgreSQL database, FastAPI API server, trading engine, and snapshot job scheduler.
+For a new setup, copy `.env.example` to `.env`. If `.env` already exists, add the
+settings from the example while keeping your other values. Set `ALPACA_API_KEY`
+and `ALPACA_SECRET_KEY` to your paper account keys and `ALPACA_PAPER=true`, then
+configure the existing PostgreSQL settings (`DATABASE_URL` uses host `db`). Keep
+the existing `hqg_network` Docker network, or create it for a new setup:
 
-### Quick Start (VM Deployment)
-
-1. **SSH into your virtual machine**
-   ```bash
-   ssh user@your-vm-ip
-   ```
-
-2. **Clone the repository**
-   ```bash
-   git clone https://github.com/Husky-Quantitative-Group/hqg-engine.git
-   cd hqg-engine
-   ```
-
-3. **Set up environment variables**
-   ```bash
-   cp .env.example .env
-   nano .env
-   # Edit .env with your actual credentials
-   ```
-
-4. **Start all services**
-   ```bash
-   docker-compose up --build -d
-   ```
-
-5. **Verify services are running**
-   ```bash
-   docker-compose ps
-   # After, all services should show "Up" status
-   ```
-
-6. **Test the API (from within VM)**
-   ```bash
-   curl http://localhost:8000/health
-   # This should return: {"status":"healthy"}
-   ```
-
-   It may also be necessary to configure the firewall to allow inbound traffic, as well as the security group in any external dashboard's cloud provider.
-
-### Common Docker Operations
-
-**View logs:**
-```bash
-docker-compose logs -f
-
-docker-compose logs -f api
-docker-compose logs -f engine
-docker-compose logs -f snapshot
-docker-compose logs -f db
+```sh
+docker network create hqg_network # Only if it does not already exist.
+docker compose up -d --build
 ```
 
-**Restart a service:**
-```bash
-docker-compose restart api
-docker-compose restart engine
-docker-compose restart snapshot
+Compose reads `.env` automatically. Rebuild with `--build` after engine changes.
+Docker and Python development install dependencies from `requirements.txt`.
+No separate algorithms checkout is required.
+
+Set the account/engine UUIDs, dashboard service URL and distinct dashboard/worker
+secrets listed in `.env.example`; Compose requires them and passes dashboard
+credentials only to the provider. Use the dashboard's real CAS/JWT login.
+
+```sh
+docker compose ps
+docker compose logs -f provider-api engine
+docker compose down
 ```
 
-**Stop all services:**
-```bash
-docker-compose down
-```
+`down` keeps the local databases. Alpaca keys are passed only to the provider;
+strategy containers have no credentials, host mounts, or network access.
 
-**Rebuild after code changes:**
-```bash
-git pull
-docker-compose up --build -d
-```
+Strategies receive completed historical bars at their declared daily, weekly,
+monthly or quarterly cadence (daily by default). The provider uses Alpaca's
+market calendar, including holidays and early closes, and waits one minute after
+the final session close for bar publication. Repeated or older bar timestamps
+do not advance a strategy. If any universe symbol is missing, the worker waits
+for the complete period instead of mixing dates. New or resumed strategy
+contexts start with the latest eligible completed bar; they do not replay missed
+periods or restore indicator history.
 
-### Externally Accessing the API
-- **API**: http://VM_IP:8000
-- **API Docs**: http://VM_IP:8000/docs
-- **Health Check**: http://VM_IP:8000/health
+`CLOSE_TO_NEXT_OPEN` waits for the following session's open before evaluating the
+completed bar. `CLOSE_TO_CLOSE` evaluates after the completed bar is available;
+live market orders cannot guarantee the historical closing price. Orders sent
+outside market hours follow Alpaca's normal order handling.
 
-## Configuration Setup
+The original `dashboard-api` remains available for database-backed history. The
+old `snapshot` job is retained under the `legacy-snapshot` profile; its retired
+provider read endpoints need migration before it can be used with this workflow.
 
-### Environment Variables (.env)
+`DASHBOARD_SYNC_URL` must be HTTPS and include the API Gateway stage. Dashboard
+credentials go only to the provider; the worker uses `PROVIDER_WORKER_SECRET`.
+Registration/configuration do not start trading: wait for acknowledgements and
+explicitly Resume after readiness and broker reconciliation. New provider boots
+require the administrative replacement procedure in the dashboard setup guide.
 
-- **Database Configuration**
-  - `DATABASE_URL`: PostgreSQL connection string (format: `postgresql+asyncpg://USER:PASSWORD@HOST:PORT/DATABASE`)
-  - `POSTGRES_DB`: Database name
-  - `POSTGRES_USER`: Database user
-  - `POSTGRES_PASSWORD`: Database password
-
-- **Execution Provider Selection**
-  - `PROVIDER`: Set to `"alpaca"` or `"ib" accordingly
-
-- **Alpaca Configuration**
-  - `ALPACA_API_KEY`: Your Alpaca API key
-  - `ALPACA_SECRET_KEY`: Your Alpaca secret key
-  - `ALPACA_PAPER`: Set to `"true"` for paper trading, `"false"` for live trading
-
-- **IBKR Configuration**
-  - `IBKR_HOST`: IBKR TWS/Gateway host
-  - `IBKR_PORT`: IBKR TWS/Gateway port
-  - `IBKR_CLIENT_ID`: Unique client ID for this connection
-
-### Config Files
-
-- **`src/config/portfolio.yaml`**: Portfolio and strategy configuration
-  - Define which strategies are active
-  - Set portfolio weights for each strategy
+Use the [offline test guide](docs/offline-testing.md) for synthetic credentials,
+Moto, disposable PostgreSQL and Docker isolation checks. No existing volumes are
+deleted or migrated. `docker compose down -v` deletes PostgreSQL history. Manually
+export wanted legacy strategy source and re-upload it through the real dashboard.

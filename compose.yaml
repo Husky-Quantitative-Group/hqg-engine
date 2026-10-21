@@ -1,4 +1,7 @@
-version: '3.8'
+x-control-environment: &control-environment
+  HQG_ACCOUNT_ID: ${HQG_ACCOUNT_ID:?Set the account UUID}
+  HQG_ENGINE_ID: ${HQG_ENGINE_ID:?Set the engine UUID}
+  PROVIDER_WORKER_SECRET: ${PROVIDER_WORKER_SECRET:?Set a worker credential}
 
 services:
   db:
@@ -58,6 +61,10 @@ services:
       db:
         condition: service_healthy
     environment:
+      <<: *control-environment
+      DASHBOARD_SYNC_SECRET: ${DASHBOARD_SYNC_SECRET:?Set the account service credential}
+      DASHBOARD_SYNC_URL: ${DASHBOARD_SYNC_URL:?Set the dashboard control URL}
+      DATABASE_URL: ${DATABASE_URL}
       NO_PROXY: ${NO_PROXY}
       no_proxy: ${no_proxy}
       HTTP_PROXY: ${HTTP_PROXY}
@@ -67,15 +74,13 @@ services:
       PROVIDER: ${PROVIDER}
       ALPACA_API_KEY: ${ALPACA_API_KEY}
       ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
-      ALPACA_PAPER: ${ALPACA_PAPER}
+      ALPACA_PAPER: ${ALPACA_PAPER:-true}
+      ALPACA_DATA_FEED: ${ALPACA_DATA_FEED:-iex}
       IBKR_HOST: ${IBKR_HOST}
       IBKR_PORT: ${IBKR_PORT}
       IBKR_CLIENT_ID: ${IBKR_CLIENT_ID}
     expose:
       - "8000"
-    networks:
-      - default
-      - hqg_network
     command: python3 -m uvicorn src.provider_instance.server:app --host 0.0.0.0 --port 8000
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -86,6 +91,7 @@ services:
     restart: unless-stopped
     networks:
       - hqg_network
+      - control
 
   dashboard-api:
     build:
@@ -117,9 +123,6 @@ services:
       PROVIDER_API_URL: http://provider-api:8000
     expose:
       - "8000"
-    networks:
-      - default
-      - hqg_network
     command: python3 -m uvicorn src.server:app --host 0.0.0.0 --port 8000
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -132,6 +135,8 @@ services:
       - hqg_network
 
   snapshot:
+    # Uses retired provider read endpoints; retained for separate migration.
+    profiles: [legacy-snapshot]
     build:
       context: .
       dockerfile: Dockerfile
@@ -163,6 +168,7 @@ services:
       - hqg_network
 
   engine:
+    image: hqg-engine-local
     build:
       context: .
       dockerfile: Dockerfile
@@ -182,25 +188,21 @@ services:
       provider-api:
         condition: service_healthy
     environment:
+      <<: *control-environment
       DATABASE_URL: ${DATABASE_URL}
       NO_PROXY: ${NO_PROXY}
       no_proxy: ${no_proxy}
       PROVIDER_API_URL: http://provider-api:8000
+      STRATEGY_SANDBOX_IMAGE: hqg-engine-local
     volumes:
       - ./src/config:/app/src/config:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     expose:
       - "8000"
-    networks:
-      - default
-      - hqg_network
     command: python3 -m src.main
     restart: unless-stopped
     networks:
-      - hqg_network
-
-networks:
-  hqg_network:
-    external: true
+      - control
 
 volumes:
   postgres_data:
@@ -208,3 +210,5 @@ volumes:
 networks:
   hqg_network:
     external: true
+  control:
+    internal: true
