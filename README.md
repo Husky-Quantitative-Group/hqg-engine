@@ -3,8 +3,9 @@
 The execution engine uses real Alpaca integration, `compose.yaml` and `.env`.
 The stack includes PostgreSQL, the provider, isolated
 strategy workers. Runtime AWS substitutes, fake login and fake readiness have
-been removed. Real strategy registration/package delivery and provider HTTPS
-transport remain unfinished; this cleanup does not complete AWS integration.
+been removed. Registration and pinned package delivery use the dashboard AWS
+backend over HTTPS. An AWS account and deployed dashboard are required for
+interactive development; see [dashboard setup](../hqg-dashboard/docs/local_setup.md).
 
 For a new setup, copy `.env.example` to `.env`. If `.env` already exists, add the
 settings from the example while keeping your other values. Set `ALPACA_API_KEY`
@@ -18,6 +19,8 @@ docker compose up -d --build
 ```
 
 Compose reads `.env` automatically. Rebuild with `--build` after engine changes.
+Docker and Python development install dependencies from `requirements.txt`.
+No separate algorithms checkout is required.
 
 Set the account/engine UUIDs, dashboard service URL and distinct dashboard/worker
 secrets listed in `.env.example`; Compose requires them and passes dashboard
@@ -35,3 +38,14 @@ strategy containers have no credentials, host mounts, or network access.
 The original `dashboard-api` remains available for database-backed history. The
 old `snapshot` job is retained under the `legacy-snapshot` profile; its retired
 provider read endpoints need migration before it can be used with this workflow.
+
+`DASHBOARD_SYNC_URL` must be HTTPS and include the API Gateway stage. Dashboard
+credentials go only to the provider; the worker uses `PROVIDER_WORKER_SECRET`.
+Registration/configuration do not start trading: wait for acknowledgements and
+explicitly Resume after readiness and broker reconciliation. New provider boots
+require the administrative replacement procedure in the dashboard setup guide.
+
+Use the [offline test guide](docs/offline-testing.md) for synthetic credentials,
+Moto, disposable PostgreSQL and Docker isolation checks. No existing volumes are
+deleted or migrated. `docker compose down -v` deletes PostgreSQL history. Manually
+export wanted legacy strategy source and re-upload it through the real dashboard.
