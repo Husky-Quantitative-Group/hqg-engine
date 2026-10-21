@@ -8,6 +8,8 @@ import threading
 import time
 from uuid import uuid4
 
+from hqg_algorithms import get_strategy_metadata
+
 from src.control.packages import validate_package
 
 
@@ -31,6 +33,7 @@ class Sandbox:
     def __init__(self, package, image=None, timeout=5):
         self.identity, metadata = validate_package(package)
         self.universe = metadata["universe"]
+        self.cadence = get_strategy_metadata(package["files"][package["entrypoint"]]).cadence
         self.package, self.timeout = package, timeout
         self.image = image or os.environ.get(
             "STRATEGY_SANDBOX_IMAGE", "hqg-engine-local"

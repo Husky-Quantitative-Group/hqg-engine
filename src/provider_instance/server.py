@@ -90,7 +90,10 @@ def create_app(provider=None, worker_secret=None, background=True):
         return await app.state.provider.register_worker(str(session_id))
 
     @app.get("/internal/broker/{mode}/{resource}")
-    async def broker_read(mode: str, resource: str, symbols: str = ""):
+    async def broker_read(
+        mode: str, resource: str, symbols: str = "",
+        bar_size: str = "1d", execution: str = "close_to_close",
+    ):
         broker = app.state.provider.brokers.get(mode)
         if broker is None:
             raise HTTPException(409, "Alpaca mode is not configured")
@@ -101,7 +104,13 @@ def create_app(provider=None, worker_secret=None, background=True):
         tickers = symbols.split(",") if symbols else []
         if not tickers or len(tickers) > 200:
             raise HTTPException(400, "1-200 symbols required")
-        return await getattr(broker, resource)(tickers)
+        if resource == "bars":
+            if bar_size not in {"1d", "1w", "1m", "1q"} or execution not in {
+                "close_to_close", "close_to_next_open",
+            }:
+                raise HTTPException(400, "Unsupported strategy cadence")
+            return await broker.bars(tickers, bar_size, execution)
+        return await broker.quotes(tickers)
 
     @app.post("/internal/rebalance")
     async def rebalance(body: Rebalance):

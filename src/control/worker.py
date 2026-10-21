@@ -1,6 +1,7 @@
 import asyncio
 import os
 import signal
+from datetime import datetime
 from uuid import uuid4
 
 from src.control.contract import MODES
@@ -18,6 +19,7 @@ class Worker:
         self.strategies, self.revision = {}, None
         self.configuration_lock = asyncio.Lock()
         self.last_weights = {}
+        self.last_bars, self.pending_rebalances = {}, {}
 
     async def load_configuration(self, state):
         async with self.configuration_lock:
@@ -36,6 +38,7 @@ class Worker:
                     strategies[mode].append((instance, item["allocation"]))
             self.strategies, self.revision = strategies, state["configuration_revision"]
             self.last_weights = {}
+            self.last_bars, self.pending_rebalances = {}, {}
 
     async def close_strategies(self):
         for strategies in self.strategies.values():
@@ -73,6 +76,10 @@ class Worker:
             self.last_weights = {
                 key: value for key, value in self.last_weights.items() if key[0] != mode
             }
+            self.last_bars = {
+                key: value for key, value in self.last_bars.items() if key[0] != mode
+            }
+            self.pending_rebalances.pop(mode, None)
             return None
 
         context = {
@@ -86,10 +93,37 @@ class Worker:
             )
         }
         context["mode"] = mode
+        if mode in self.pending_rebalances and self.revision == state["configuration_revision"]:
+            return await self.send_rebalance(context)
         try:
             await self.load_configuration(state)
             strategies = self.strategies[mode]
             broker = self.brokers[mode]
+            fresh = {}
+            for index, (instance, _) in enumerate(strategies):
+                data = await broker.bars(
+                    instance.universe, instance.cadence.bar_size.value,
+                    instance.cadence.execution.value,
+                )
+                if not data or any(symbol not in data for symbol in instance.universe):
+                    continue
+                timestamps = {
+                    datetime.fromisoformat(data[symbol]["timestamp"])
+                    for symbol in instance.universe
+                }
+                if any(timestamp.tzinfo is None for timestamp in timestamps):
+                    raise ValueError("Bar timestamps require a timezone")
+                if len(timestamps) != 1:
+                    continue  # Wait for a complete, aligned multi-symbol bar.
+                timestamp = timestamps.pop()
+                previous = self.last_bars.get((mode, index))
+                if previous is None or timestamp > previous:
+                    fresh[index] = (timestamp, {
+                        symbol: {key: value for key, value in data[symbol].items() if key != "timestamp"}
+                        for symbol in instance.universe
+                    })
+            if not fresh:
+                return None
             positions = {
                 p["symbol"]: float(p["qty"])
                 for p in await broker.request("GET", "v2/positions")
@@ -108,14 +142,14 @@ class Worker:
                 "positions": positions,
                 "weights": held_weights,
             }
-            bars = await broker.bars(
-                sorted({s for instance, _ in strategies for s in instance.universe})
-            )
             weights = {}
             all_hold, initial_hold = True, False
             for index, (instance, allocation) in enumerate(strategies):
-                data = {symbol: bars[symbol] for symbol in instance.universe}
-                targets = await asyncio.to_thread(instance.on_data, data, portfolio)
+                targets = None
+                if index in fresh:
+                    timestamp, data = fresh[index]
+                    targets = await asyncio.to_thread(instance.on_data, data, portfolio)
+                    self.last_bars[(mode, index)] = timestamp
                 if targets is None:
                     initial_hold |= (mode, index) not in self.last_weights
                     targets = self.last_weights.get((mode, index), {})
@@ -136,16 +170,24 @@ class Worker:
                 "internal/failure", json={"context": context, "message": str(exc)[:500]}
             )
             raise
-        response = await self.client.post(
-            "internal/rebalance",
-            json={
+        return await self.send_rebalance(context, weights)
+
+    async def send_rebalance(self, context, weights=None):
+        mode = context["mode"]
+        pending = self.pending_rebalances.get(mode)
+        if weights is not None or pending["context"] != context:
+            # Retain a calculated signal across temporary rejection without
+            # evaluating its bar again. Retries reuse the same operation ID.
+            pending = self.pending_rebalances[mode] = {
                 "context": context,
                 "operation_id": str(uuid4()),
-                "target_weights": weights,
-            },
+                "target_weights": weights if weights is not None else pending["target_weights"],
+            }
+        response = await self.client.post(
+            "internal/rebalance", json=pending,
         )
         response.raise_for_status()
-
+        self.pending_rebalances.pop(mode, None)
         return response.json()
 
     async def mode_loop(self, mode):

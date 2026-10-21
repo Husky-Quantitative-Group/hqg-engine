@@ -15,6 +15,7 @@ from hqg_algorithms import (
     TargetWeights,
     Hold,
     Liquidate,
+    get_strategy_metadata,
 )
 
 from src.control.packages import validate_package
@@ -52,9 +53,12 @@ def main():
                         if (
                             not issubclass(cls, Strategy)
                             or list(cls.universe) != metadata["universe"]
+                            or cls.cadence != get_strategy_metadata(
+                                package["files"][package["entrypoint"]]
+                            ).cadence
                         ):
                             raise ValueError(
-                                "Strategy class or universe differs from registered package"
+                                "Strategy class, universe or cadence differs from registered package"
                             )
                         instance = cls()
                         result = {"ready": True}

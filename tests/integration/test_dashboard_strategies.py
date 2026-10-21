@@ -207,6 +207,13 @@ def test_dashboard_package_runs_both_modes_and_multiple_allocations(tmp_path):
                     "MSFT": 20.0,
                 }
                 await h.provider.sync_once()  # renew short test permission after container startup
+                count = len(h.broker_app.state.contexts["paper"]["requests"])
+                assert await worker.cycle("paper") is None  # Same daily bar: no strategy advancement.
+                assert not any(
+                    request["method"] == "POST"
+                    for request in h.broker_app.state.contexts["paper"]["requests"][count:]
+                )
+                h.broker_app.state.contexts["paper"]["bar_timestamp"] = "2026-10-12T00:00:00-04:00"
                 await worker.cycle("paper")
                 assert h.broker_app.state.contexts["paper"]["positions"]["AAPL"] == 35.0
                 assert h.broker_app.state.contexts["live"]["positions"]["AAPL"] == 100.0
@@ -326,8 +333,10 @@ class Signals(Strategy):
                 await h.resume("paper")
                 await worker.cycle("paper")
                 assert context["positions"] == initial_positions
+                context["bar_timestamp"] = "2026-10-12T00:00:00-04:00"
                 await worker.cycle("paper")
                 assert context["positions"] == initial_positions
+                context["bar_timestamp"] = "2026-10-13T00:00:00-04:00"
                 await worker.cycle("paper")
                 assert context["positions"]["AAPL"] == (
                     50.0 if include_balanced else 30.0
@@ -337,11 +346,13 @@ class Signals(Strategy):
                 )
                 count = len([r for r in context["requests"]
                             if r["method"] == "POST"])
+                context["bar_timestamp"] = "2026-10-14T00:00:00-04:00"
                 await worker.cycle("paper")
                 assert (
                     len([r for r in context["requests"] if r["method"] == "POST"])
                     == count
                 )
+                context["bar_timestamp"] = "2026-10-15T00:00:00-04:00"
                 await worker.cycle("paper")
                 if include_balanced:
                     assert context["positions"] == {"AAPL": 20.0, "MSFT": 10.0}

@@ -15,6 +15,7 @@ def create_app():
             "positions": {},
             "orders": {},
             "quotes": {"AAPL": 100, "MSFT": 200},
+            "bar_timestamp": "2026-10-09T00:00:00-04:00",
             "faults": {},
             "requests": [],
         }
@@ -61,8 +62,8 @@ def create_app():
             return Response("broken", media_type="application/json")
         if path == "v2/account" and method == "GET":
             return {"id": "00000000-0000-4000-8000-00000000000" + ("3" if mode == "paper" else "4"), "equity": str(context["equity"]), "cash": str(context["equity"] - sum(q * context["quotes"][s] for s, q in context["positions"].items()))}
-        if path == "v2/stocks/bars/latest" and method == "GET":
-            return {"bars": {symbol: {"o": price - 2, "h": price + 3, "l": price - 4, "c": price, "v": 12345} for symbol, price in context["quotes"].items() if symbol in request.query_params["symbols"].split(",")}}
+        if path == "v2/stocks/bars" and method == "GET":
+            return {"bars": {symbol: [{"o": price - 2, "h": price + 3, "l": price - 4, "c": price, "v": 12345, "t": context["bar_timestamp"]}] for symbol, price in context["quotes"].items() if symbol in request.query_params["symbols"].split(",")}}
         if path == "v2/positions" and method == "GET":
             return [
                 {"symbol": s, "qty": str(q)} for s, q in context["positions"].items()
@@ -183,10 +184,13 @@ class Broker:
         response.raise_for_status()
         return {symbol: float(quote["ap"]) for symbol, quote in response.json()["quotes"].items()}
 
-    async def bars(self, symbols):
-        response = await self.data.get("v2/stocks/bars/latest", params={"symbols": ",".join(symbols)})
+    async def bars(self, symbols, bar_size="1d", execution="close_to_close"):
+        response = await self.data.get("v2/stocks/bars", params={"symbols": ",".join(symbols), "timeframe": bar_size})
         response.raise_for_status()
-        return {symbol: {key: float(bar[short]) for key, short in (("open", "o"), ("high", "h"), ("low", "l"), ("close", "c"), ("volume", "v"))} for symbol, bar in response.json()["bars"].items()}
+        return {symbol: {
+            **{key: float(bars[0][short]) for key, short in (("open", "o"), ("high", "h"), ("low", "l"), ("close", "c"), ("volume", "v"))},
+            "timestamp": bars[0]["t"],
+        } for symbol, bars in response.json()["bars"].items()}
 
     async def close(self):
         await self.trading.aclose()

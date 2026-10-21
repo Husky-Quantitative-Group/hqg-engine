@@ -1,6 +1,7 @@
 import asyncio
 import json
 import threading
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -13,6 +14,7 @@ from urllib3.connection import HTTPSConnection
 from src.control.transport import (
     AdmissionConnection, AdmissionPool, Broker, BrokerReader, brokers_from_environment,
 )
+from src.control import transport
 
 
 def response(request, body, status=200):
@@ -22,23 +24,41 @@ def response(request, body, status=200):
     return result
 
 
-def test_existing_sdk_clients_supply_real_hosts_credentials_feed_and_bars(monkeypatch):
+@pytest.mark.parametrize("bar_size,timeframe,start", [
+    ("1d", "1Day", "2026-10-02T00:00:00-04:00"),
+    ("1w", "1Week", "2026-09-28T00:00:00-04:00"),
+    ("1m", "1Month", "2026-09-01T00:00:00-04:00"),
+    ("1q", "3Month", "2026-07-01T00:00:00-04:00"),
+])
+def test_existing_sdk_clients_supply_real_hosts_credentials_feed_and_bars(monkeypatch, bar_size, timeframe, start):
     seen = []
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 2, 20, 2, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(transport, "datetime", Clock)
 
     def send(self, request, **kwargs):
         seen.append(request)
         path = urlsplit(request.url).path
         if path == "/v2/account":
             return response(request, {"id": "account"})
+        if path == "/v2/calendar":
+            return response(request, [
+                {"date": day, "open": "09:30", "close": "16:00"}
+                for day in ("2026-09-28", "2026-09-30", "2026-10-01", "2026-10-02", "2026-10-05")
+            ])
         if path.endswith("quotes/latest"):
             return response(request, {"quotes": {"SPY": {
                 "ap": 500, "as": 10, "bp": 499, "bs": 10,
                 "ax": "V", "bx": "V", "t": "2026-10-09T19:59:00Z",
             }}})
-        return response(request, {"bars": {"SPY": {
+        return response(request, {"bars": {"SPY": [{
             "o": 490, "h": 510, "l": 485, "c": 500, "v": 1000000, "n": 10, "vw": 500,
-            "t": "2026-10-09T19:59:00Z",
-        }}})
+            "t": start,
+        }]}})
 
     monkeypatch.setattr(requests.Session, "send", send)
 
@@ -47,17 +67,76 @@ def test_existing_sdk_clients_supply_real_hosts_credentials_feed_and_bars(monkey
         try:
             assert await broker.request("GET", "v2/account") == {"id": "account"}
             assert await broker.quotes(["SPY"]) == {"SPY": 500}
-            assert (await broker.bars(["SPY"]))["SPY"] == {
+            assert (await broker.bars(["SPY"], bar_size))["SPY"] == {
                 "open": 490, "high": 510, "low": 485,
                 "close": 500, "volume": 1000000,
+                "timestamp": start,
             }
             assert [urlsplit(r.url).hostname for r in seen] == [
-                "paper-api.alpaca.markets", "data.alpaca.markets", "data.alpaca.markets",
+                "paper-api.alpaca.markets", "data.alpaca.markets",
+                "paper-api.alpaca.markets", "data.alpaca.markets",
             ]
             assert all(r.headers["APCA-API-KEY-ID"] == "test-key" for r in seen)
             assert all(r.headers["APCA-API-SECRET-KEY"] == "test-secret" for r in seen)
-            assert urlsplit(seen[-1].url).path == "/v2/stocks/bars/latest"
+            assert urlsplit(seen[-1].url).path == "/v2/stocks/bars"
             assert parse_qs(urlsplit(seen[-1].url).query)["feed"] == ["iex"]
+            assert parse_qs(urlsplit(seen[-1].url).query)["timeframe"] == [timeframe]
+            assert parse_qs(urlsplit(seen[-1].url).query)["start"] == [
+                datetime.fromisoformat(start).astimezone(timezone.utc).isoformat()
+            ]
+            await broker.bars(["SPY"], bar_size)
+            assert len(seen) == 4  # Polling an already completed bar uses the cache.
+        finally:
+            await broker.close()
+
+    asyncio.run(scenario())
+
+
+def test_completed_bars_wait_for_all_symbols_and_refresh_at_the_next_close(monkeypatch):
+    now = datetime(2026, 10, 2, 20, 2, tzinfo=timezone.utc)
+    timestamp, missing, reads = "2026-10-01T04:00:00Z", False, []
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    def send(self, request, **kwargs):
+        if urlsplit(request.url).path == "/v2/calendar":
+            return response(request, [
+                {"date": day, "open": "09:30", "close": "16:00"}
+                for day in ("2026-10-01", "2026-10-02", "2026-10-05", "2026-10-06")
+            ])
+        reads.append(request)
+        return response(request, {"bars": {
+            symbol: [{"t": timestamp, "o": 98, "h": 103, "l": 96, "c": 100,
+                      "v": 12345, "n": 10, "vw": 100}]
+            for symbol in ("AAPL", "MSFT") if not missing or symbol != "MSFT"
+        }})
+
+    monkeypatch.setattr(transport, "datetime", Clock)
+    monkeypatch.setattr(requests.Session, "send", send)
+
+    async def scenario():
+        nonlocal now, timestamp, missing
+        broker = Broker("paper", "key", "secret")
+        try:
+            assert await broker.bars(["AAPL", "MSFT"]) == {}  # Older period.
+            timestamp, missing = "2026-10-02T04:00:00Z", True
+            assert await broker.bars(["AAPL", "MSFT"]) == {}  # Incomplete universe.
+            missing = False
+            assert len(await broker.bars(["AAPL", "MSFT"])) == 2
+            await broker.bars(["AAPL", "MSFT"])
+            assert len(reads) == 3
+            # Monday's in-progress daily bar is not eligible before its close.
+            now = datetime(2026, 10, 5, 19, 0, tzinfo=timezone.utc)
+            await broker.bars(["AAPL", "MSFT"])
+            assert len(reads) == 3
+            now = datetime(2026, 10, 5, 20, 2, tzinfo=timezone.utc)
+            timestamp = "2026-10-05T04:00:00Z"
+            result = await broker.bars(["AAPL", "MSFT"])
+            assert result["AAPL"]["timestamp"] == "2026-10-05T00:00:00-04:00"
+            assert len(reads) == 4
         finally:
             await broker.close()
 

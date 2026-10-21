@@ -4,6 +4,7 @@ import asyncio
 import math
 import os
 import threading
+from datetime import date, datetime, timezone
 from contextvars import ContextVar
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -12,7 +13,11 @@ import httpx
 from requests.adapters import HTTPAdapter
 from urllib3.connection import HTTPSConnection
 from urllib3.connectionpool import HTTPSConnectionPool
-from alpaca.data.requests import StockLatestQuoteRequest, StockLatestBarRequest
+from alpaca.data.requests import StockLatestQuoteRequest, StockBarsRequest
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+from alpaca.trading.requests import GetCalendarRequest
+
+from src.control.cadence import MARKET_ZONE, completed_period
 
 from src.execution_provider.alpaca import AlpacaExecutor
 from src.marketdata_provider.alpaca import AlpacaMarketData
@@ -131,6 +136,8 @@ class Broker:
         ).trading_client
         self.data = AlpacaMarketData(api_key, secret_key).data_client
         self.lock = threading.Lock()
+        self.calendar, self.calendar_date = [], None
+        self.bar_cache = {}
         for client in (self.trading, self.data):
             # No SDK resubmission of orders with uncertain outcomes. The provider
             # owns reconciliation and retries; SDK requests have bounded timeouts.
@@ -179,24 +186,62 @@ class Broker:
             raise ValueError("Alpaca returned an invalid or unavailable quote")
         return prices
 
-    async def bars(self, symbols):
+    async def bars(self, symbols, bar_size="1d", execution="close_to_close"):
+        now = datetime.now(timezone.utc)
+        today = now.astimezone(MARKET_ZONE).date()
+        if self.calendar_date != today:
+            calendar = await self.call(
+                self.trading.get_calendar,
+                GetCalendarRequest(start=date(today.year - 1, 1, 1), end=date(today.year + 1, 12, 31)),
+            )
+            if not calendar:
+                raise ValueError("Alpaca returned an empty market calendar")
+            self.calendar, self.calendar_date = calendar, today
+        period = completed_period(self.calendar, bar_size, execution, now)
+        if period is None:
+            return {}
+        start, end = period
+        cached_start, cached = self.bar_cache.get(bar_size, (None, {}))
+        if cached_start != start:
+            cached = {}
+        missing = [symbol for symbol in symbols if symbol not in cached]
+        if not missing:
+            return {symbol: cached[symbol] for symbol in symbols}
+        timeframe = {
+            "1d": TimeFrame.Day, "1w": TimeFrame.Week, "1m": TimeFrame.Month,
+            "1q": TimeFrame(3, TimeFrameUnit.Month),
+        }[bar_size]
         bars = await self.call(
-            self.data.get_stock_latest_bar,
-            StockLatestBarRequest(symbol_or_symbols=symbols, feed=self.feed),
+            self.data.get_stock_bars,
+            StockBarsRequest(
+                symbol_or_symbols=missing, feed=self.feed, timeframe=timeframe,
+                start=start, end=end,
+            ),
         )
+        # Missing/delayed symbols are retried; never mix periods in a strategy Slice.
+        if any(
+            symbol not in bars.data or len(bars[symbol]) != 1
+            or bars[symbol][0].timestamp != start
+            for symbol in missing
+        ):
+            return {}
         result = {
             symbol: {
-                key: float(getattr(bars[symbol], key))
+                key: float(getattr(bars[symbol][0], key))
                 for key in ("open", "high", "low", "close", "volume")
             }
-            for symbol in symbols
+            for symbol in missing
         }
         if any(
             not math.isfinite(value) or value < 0 or (key != "volume" and value == 0)
             for bar in result.values() for key, value in bar.items()
         ):
             raise ValueError("Alpaca returned invalid bars")
-        return result
+        cached.update({
+            symbol: {**bar, "timestamp": start.isoformat()} for symbol, bar in result.items()
+        })
+        self.bar_cache[bar_size] = (start, cached)
+        return {symbol: cached[symbol] for symbol in symbols}
 
     async def close(self):
         for client in (self.trading, self.data):
@@ -242,8 +287,10 @@ class BrokerReader:
     async def quotes(self, symbols):
         return await self.get("quotes", symbols=",".join(symbols)) if symbols else {}
 
-    async def bars(self, symbols):
-        return await self.get("bars", symbols=",".join(symbols))
+    async def bars(self, symbols, bar_size="1d", execution="close_to_close"):
+        return await self.get(
+            "bars", symbols=",".join(symbols), bar_size=bar_size, execution=execution
+        )
 
     async def close(self):
         pass  # The worker owns the shared client.

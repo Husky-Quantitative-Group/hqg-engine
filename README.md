@@ -35,6 +35,20 @@ docker compose down
 `down` keeps the local databases. Alpaca keys are passed only to the provider;
 strategy containers have no credentials, host mounts, or network access.
 
+Strategies receive completed historical bars at their declared daily, weekly,
+monthly or quarterly cadence (daily by default). The provider uses Alpaca's
+market calendar, including holidays and early closes, and waits one minute after
+the final session close for bar publication. Repeated or older bar timestamps
+do not advance a strategy. If any universe symbol is missing, the worker waits
+for the complete period instead of mixing dates. New or resumed strategy
+contexts start with the latest eligible completed bar; they do not replay missed
+periods or restore indicator history.
+
+`CLOSE_TO_NEXT_OPEN` waits for the following session's open before evaluating the
+completed bar. `CLOSE_TO_CLOSE` evaluates after the completed bar is available;
+live market orders cannot guarantee the historical closing price. Orders sent
+outside market hours follow Alpaca's normal order handling.
+
 The original `dashboard-api` remains available for database-backed history. The
 old `snapshot` job is retained under the `legacy-snapshot` profile; its retired
 provider read endpoints need migration before it can be used with this workflow.
