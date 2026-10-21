@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select, text
 
 from conftest import Harness, ACCOUNT, HTTPServer, WORKER_SECRET
@@ -93,23 +94,22 @@ def test_authorization_configuration_and_concurrent_worker_contexts(tmp_path):
             no_mode = {
                 "context": h.context("paper"),
                 "operation_id": str(uuid4()),
-                "symbol": "AAPL",
-                "quantity": 1.0,
-                "side": "buy",
+                "target_weights": {"AAPL": 0.4},
             }
             del no_mode["context"]["mode"]
             assert (
-                await h.execution.post("/internal/order", json=no_mode)
+                await h.execution.post("/internal/rebalance", json=no_mode)
             ).status_code == 422
             no_mode["context"]["mode"] = "live"
             no_mode["context"]["account_id"] = str(uuid4())
             assert (
-                await h.execution.post("/internal/order", json=no_mode)
+                await h.execution.post("/internal/rebalance", json=no_mode)
             ).status_code == 403
+            assert (await h.execution.post("/internal/order", json={})).status_code == 404
             for mutation in ("order", "rebalance", "liquidate"):
                 assert (
                     await h.execution.post("/execution/" + mutation)
-                ).status_code == 410
+                ).status_code == 404
 
     run(scenario())
 
@@ -205,7 +205,9 @@ def test_health_failure_closes_both_modes_and_requires_incident_resume(
                 )
             assert not await h.provider.sync_once()
             assert all(not s["gate_open"] for s in h.provider.modes.values())
-            assert (await h.order("paper")).status_code == 409
+            with pytest.raises(HTTPException) as blocked:
+                await h.submit("paper")
+            assert blocked.value.status_code == 409
             h.dashboard_app.state.faults.update(backend=False, delay=0)
             h.readiness_app.state.faults.update(
                 control=False, website=False, generic_health=False
@@ -290,7 +292,7 @@ def test_cancellation_uncertainty_and_fill_are_recorded_without_liquidation(
             await h.resume("paper")
             ctx = h.broker_app.state.contexts["paper"]
             ctx["faults"].update(order_status="partially_filled", cancel_failure=True)
-            assert (await h.order("paper")).status_code == 200
+            assert (await h.submit("paper"))["status"] == "partially_filled"
             _, stop = await h.action("stop_all")
             assert stop.status_code == 200
             await h.sync_clean()
@@ -333,7 +335,9 @@ def test_timeout_after_acceptance_reconciles_by_client_id_and_discards_old_conte
             ctx["faults"]["submission_delay"] = 0.5
             old_context = h.context("paper")
             operation = str(uuid4())
-            assert (await h.order("paper", operation)).status_code == 503
+            with pytest.raises(HTTPException) as uncertain:
+                await h.submit("paper", operation)
+            assert uncertain.value.status_code == 503
             ctx["faults"].clear()
             await h.sync_clean()
             assert {
@@ -343,17 +347,9 @@ def test_timeout_after_acceptance_reconciles_by_client_id_and_discards_old_conte
                 r["path"] == "v2/orders:by_client_order_id" for r in ctx["requests"]
             )
             await h.resume("paper")
-            stale = await h.execution.post(
-                "/internal/order",
-                json={
-                    "context": old_context,
-                    "operation_id": operation,
-                    "symbol": "AAPL",
-                    "quantity": 1.0,
-                    "side": "buy",
-                },
-            )
-            assert stale.status_code == 409
+            with pytest.raises(HTTPException) as stale:
+                await h.submit("paper", operation, context=old_context)
+            assert stale.value.status_code == 409
             assert len([r for r in ctx["requests"] if r["method"] == "POST"]) == 1
 
     run(scenario())
@@ -458,7 +454,7 @@ def test_dynamodb_atomic_configuration_audit_and_idempotency(tmp_path):
                 assert store.get(ACCOUNT, "audit#invalid") is None
                 assert store.get(ACCOUNT, "state") == current
                 await h.resume("paper")
-                assert (await h.order("paper")).status_code == 200
+                assert (await h.submit("paper"))["status"] == "filled"
 
     run(scenario())
 
@@ -469,13 +465,15 @@ def test_disabled_live_and_account_service_authentication(tmp_path):
             await h.configure(live=False)
             _, response = await h.action("resume", "live")
             assert response.status_code == 409
-            assert (await h.order("live")).status_code == 409
+            with pytest.raises(HTTPException) as blocked:
+                await h.submit("live")
+            assert blocked.value.status_code == 409
             h.user.cookies.set("test_actor", "paper-operator")
             # The live grant is checked before mode enablement and no action is written.
             _, response = await h.action("resume", "live")
             assert response.status_code == 403
             await h.resume("paper")
-            assert (await h.order("paper")).status_code == 200
+            assert (await h.submit("paper"))["status"] == "filled"
             async with httpx.AsyncClient(
                 base_url=h.provider_server.url, trust_env=False
             ) as stranger:
@@ -483,7 +481,7 @@ def test_disabled_live_and_account_service_authentication(tmp_path):
                     await stranger.post("/internal/sessions/" + str(uuid4()))
                 ).status_code == 403
                 assert (
-                    await stranger.post("/internal/order", json={})
+                    await stranger.post("/internal/rebalance", json={})
                 ).status_code == 403
             response = await h.user.post(
                 f"/internal/v1/accounts/{ACCOUNT}/sync", json=h.provider.state()
@@ -500,13 +498,15 @@ def test_queued_order_is_discarded_after_stop(tmp_path):
             await h.resume("paper")
             lock = h.provider.order_locks["paper"]
             await lock.acquire()
-            queued = asyncio.create_task(h.order("paper"))
+            queued = asyncio.create_task(h.submit("paper"))
             await asyncio.sleep(0.04)
             _, response = await h.action("stop", "paper")
             assert response.status_code == 200
             assert await h.provider.sync_once()
             lock.release()
-            assert (await queued).status_code == 409
+            with pytest.raises(HTTPException) as blocked:
+                await queued
+            assert blocked.value.status_code == 409
             assert not any(
                 r["method"] == "POST"
                 for r in h.broker_app.state.contexts["paper"]["requests"]
@@ -534,11 +534,13 @@ def test_permission_is_rechecked_after_http_transport_wait(tmp_path):
             h.provider.brokers["paper"].trading.event_hooks["request"].append(
                 pause_before_transport
             )
-            queued = asyncio.create_task(h.order("paper"))
+            queued = asyncio.create_task(h.submit("paper"))
             await transport_wait.wait()
             h.provider.deadline = __import__("time").monotonic()
             release.set()
-            assert (await queued).status_code == 409
+            with pytest.raises(HTTPException) as blocked:
+                await queued
+            assert blocked.value.status_code == 409
             assert all(not status["gate_open"] for status in h.provider.modes.values())
             assert not any(
                 r["method"] == "POST"
@@ -561,7 +563,9 @@ def test_broker_faults_reconcile_without_retrying_submission(tmp_path, fault):
             await h.resume("paper")
             ctx = h.broker_app.state.contexts["paper"]
             ctx["faults"][fault] = True
-            assert (await h.order("paper")).status_code == 503
+            with pytest.raises(HTTPException) as uncertain:
+                await h.submit("paper")
+            assert uncertain.value.status_code == 503
             assert all(not status["gate_open"] for status in h.provider.modes.values())
             ctx["faults"].clear()
             await h.sync_clean()
@@ -639,7 +643,9 @@ def test_sdk_order_errors_preserve_reconciliation_status(tmp_path, monkeypatch, 
             broker = Broker("paper", "test-key", "test-secret")
             h.provider.brokers["paper"] = broker
             try:
-                assert (await h.order("paper")).status_code == 503
+                with pytest.raises(HTTPException) as uncertain:
+                    await h.submit("paper")
+                assert uncertain.value.status_code == 503
                 assert {r["status"] for r in (await h.runtime.orders("paper")).values()} == {expected}
                 assert not any(mode["gate_open"] for mode in h.provider.modes.values())
             finally:

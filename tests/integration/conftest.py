@@ -273,16 +273,13 @@ class Harness:
             "mode": mode,
         }
 
-    async def order(self, mode, operation_id=None):
+    async def submit(self, mode, operation_id=None, context=None):
         from uuid import uuid4
 
-        return await self.execution.post(
-            "/internal/order",
-            json={
-                "context": self.context(mode),
-                "operation_id": operation_id or str(uuid4()),
-                "symbol": "AAPL",
-                "quantity": 1.0,
-                "side": "buy",
-            },
+        return await self.provider.submit(
+            context or self.context(mode),
+            operation_id or str(uuid4()),
+            "AAPL",
+            1.0,
+            "buy",
         )

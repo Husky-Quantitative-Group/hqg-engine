@@ -3,6 +3,7 @@ from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 from fastapi import HTTPException
 
@@ -88,22 +89,19 @@ def test_get_portfolio_raises_404_when_missing():
     assert exc_info.value.detail == "Portfolio 404 not found"
 
 
-@pytest.mark.parametrize("endpoint", [routes.stop_trading, routes.resume_trading, routes.liquidate_all])
-def test_legacy_mutations_are_disabled(endpoint):
-    session = make_session()
-    with pytest.raises(HTTPException) as exc:
-        run(endpoint(3, session))
-    assert exc.value.status_code == 410
-    session.execute.assert_not_awaited()
-    session.commit.assert_not_awaited()
+@pytest.mark.parametrize(
+    "path", ["/portfolio", "/portfolio/3/stop", "/portfolio/3/resume", "/portfolio/3/liquidate"]
+)
+def test_legacy_portfolio_mutations_are_removed(path):
+    from src.server import app
 
+    async def scenario():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as client:
+            assert (await client.post(path, json={})).status_code == 404
 
-def test_legacy_portfolio_creation_is_disabled():
-    session = make_session()
-    with pytest.raises(HTTPException) as exc:
-        run(routes.create_portfolio(routes.PortfolioRequest(portfolio_id=3, name="test", is_active=True), session))
-    assert exc.value.status_code == 410
-    session.commit.assert_not_awaited()
+    run(scenario())
 
 
 def test_get_equity_serializes_snapshots_in_query_order():

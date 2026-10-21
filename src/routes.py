@@ -52,11 +52,6 @@ async def get_portfolio(portfolio_id: int, session: AsyncSession):
     
     return portfolio
 
-class TradeResponse(BaseModel):
-    """Expected data model for trading endpoints"""
-    success: bool
-    message: str
-
 class EquityPoint(BaseModel):
     """Expected data model for equity curve data points"""
     timestamp: str
@@ -130,37 +125,6 @@ class AllocationEvent(BaseModel):
 class AllocationEventsResponse(PortfolioContext):
     """Expected data model for allocation events endpoint"""
     events: List[AllocationEvent]
-
-class PortfolioRequest(BaseModel):
-    portfolio_id: int
-    name: str
-    is_active: bool
-
-class PortfolioResponse(BaseModel):
-    """Expected data model for portfolio endpoint"""
-    portfolio_id: int
-    name: str
-    is_active: bool
-
-@router.post("/portfolio", response_model=PortfolioResponse)
-async def create_portfolio(portfolio: PortfolioRequest, session: AsyncSession = Depends(get_session)):
-    raise HTTPException(status_code=410, detail="Configure portfolios through dashboard account control")
-
-
-@router.post("/portfolio/{id}/stop", response_model=TradeResponse)
-async def stop_trading(id: int, session: AsyncSession = Depends(get_session)):
-    raise HTTPException(status_code=410, detail="Use dashboard account Stop")
-
-
-@router.post("/portfolio/{id}/resume", response_model=TradeResponse)
-async def resume_trading(id: int, session: AsyncSession = Depends(get_session)):
-    raise HTTPException(status_code=410, detail="Use dashboard incident-bound Resume")
-
-
-@router.post("/portfolio/{id}/liquidate", response_model=TradeResponse)
-async def liquidate_all(id: int, session: AsyncSession = Depends(get_session)):
-    raise HTTPException(status_code=410, detail="Liquidation is outside the current MVP-POC")
-
 
 @router.get("/portfolio/{id}/equity", response_model=EquityResponse)
 async def get_equity(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):

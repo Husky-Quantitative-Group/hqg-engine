@@ -22,15 +22,6 @@ class Context(BaseModel):
     configuration_digest: str
 
 
-class Order(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-    context: Context
-    operation_id: str
-    symbol: str
-    quantity: float = Field(gt=0, allow_inf_nan=False)
-    side: str
-
-
 class Rebalance(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     context: Context
@@ -112,22 +103,6 @@ def create_app(provider=None, worker_secret=None, background=True):
             raise HTTPException(400, "1-200 symbols required")
         return await getattr(broker, resource)(tickers)
 
-    @app.post("/internal/order")
-    async def order(body: Order):
-        try:
-            return await app.state.provider.submit(
-                body.context.model_dump(),
-                body.operation_id,
-                body.symbol,
-                body.quantity,
-                body.side,
-            )
-        except HTTPException:
-            raise
-        except Exception:
-            app.state.provider.close(("paper", "live"), "runtime_database_unavailable")
-            raise HTTPException(503, "Execution unavailable")
-
     @app.post("/internal/rebalance")
     async def rebalance(body: Rebalance):
         try:
@@ -150,13 +125,6 @@ def create_app(provider=None, worker_secret=None, background=True):
         app.state.provider.modes[context["mode"]]["strategy_error"] = body.message
         await app.state.provider.persist()
         return {"state": "paused"}
-
-    # These paths previously reached the ungated SDK directly.
-    @app.post("/execution/{operation}")
-    async def legacy(operation: str):
-        raise HTTPException(
-            410, "Use dashboard account control and authenticated execution contexts"
-        )
 
     return app
 
