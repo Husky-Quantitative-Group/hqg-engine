@@ -36,6 +36,16 @@ async def init_db():
         def create_tables(sync_conn):
             Base.metadata.create_all(bind=sync_conn)
         await conn.run_sync(create_tables)
+        # Idempotent migration for pre-control databases - existing history stays paper.
+        for statement in (
+            "ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS account_id VARCHAR(36)",
+            "ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS mode VARCHAR(5)",
+            "ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS dashboard_uuid VARCHAR(36)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS portfolios_account_mode ON portfolios (account_id, mode)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS portfolios_dashboard_uuid ON portfolios (dashboard_uuid)",
+            "UPDATE portfolios SET is_active = false",
+        ):
+            await conn.execute(text(statement))
     print("Initialized database")
 
 async def close_db():

@@ -64,31 +64,6 @@ class ProviderApiClient:
         response.raise_for_status()
         return response.json()
     
-    async def place_order(self, symbol, quantity, side):
-        response = await self.client.post(
-            "/execution/order",
-            params={"symbol": symbol, "quantity": quantity, "side": side}
-        )
-        response.raise_for_status()
-        return response.json()
-    
-    async def rebalance(self, target_weights, portfolio_value, market_data):
-        response = await self.client.post(
-            "/execution/rebalance",
-            json={
-                "target_weights": target_weights,
-                "portfolio_value": portfolio_value,
-                "market_data": market_data
-            }
-        )
-        response.raise_for_status()
-        return response.json()
-    
-    async def liquidate(self):
-        response = await self.client.post("/execution/liquidate")
-        response.raise_for_status()
-        return response.json()
-    
     async def close(self):  
         await self.client.aclose()
 
