@@ -1,10 +1,12 @@
 from pathlib import Path
+from collections import deque
 import yaml
 import logging
 from datetime import datetime, timezone
 
 from hqg_algorithms import Slice, PortfolioView, BarSize, Bar, TargetWeights, Hold, Liquidate
 from src.aggregator import aggregate_allocations
+from src.alt_data import AlternativeData, normalize_series
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +20,12 @@ class Portfolio:
         self._bar_aggregate: dict[tuple, dict] = {} # aggregate OHLCV period data for each symbol (for each strategy)
         self.load_config()
         self.init_strategies()
+        series = sorted({s for strategy in self.strategies for s in strategy['alt_data']})
+        self.alt_data = AlternativeData(series) if series else None
+
+    async def initialize(self):
+        if self.alt_data is not None:
+            await self.alt_data.refresh(self.alt_data.ids)
         
     def load_config(self):
         config_file = Path(self.config_path)
@@ -62,6 +70,7 @@ class Portfolio:
                 'weight': portfolio_weight,
                 'universe': universe,
                 'cadence': StrategyClass.cadence,
+                'alt_data': normalize_series(getattr(StrategyClass, 'alt_data', [])),
             })
             
             logger.info(f"Initialized strategy: {strategy_id} ({class_name}) with weight {portfolio_weight:.2%}, universe: {universe}")
@@ -119,12 +128,13 @@ class Portfolio:
 
         for strategy in self.strategies:
             strategy_id = strategy['id']
-            strategy_instance = strategy['instance']
-            aum_weight = strategy['weight']
             universe = strategy['universe']
             cadence = strategy['cadence']
             bar_size = cadence.bar_size
-            state = self._strategy_state.setdefault(strategy_id, {'current_bar_period': None, 'last_output': None})
+            state = self._strategy_state.setdefault(strategy_id, {
+                'current_bar_period': None, 'last_output': None,
+                'pending': deque(),
+            })
 
             utc = event_time
             if utc.tzinfo is None:
@@ -153,8 +163,6 @@ class Portfolio:
                     bar_size,
                     strategy_id,
                 )
-
-            allocations_dict = None
 
             if state['current_bar_period'] is None:
                 state['current_bar_period'] = tick_bar_period
@@ -195,8 +203,6 @@ class Portfolio:
                             if tick.volume is not None:
                                 acc["volume"] = (acc["volume"] or 0.0) + tick.volume
 
-                allocations_dict = state['last_output']
-
             else: # new period; close bar, and move on
                 completed_bar_period = state['current_bar_period']
                 bars: dict[str, Bar] = {}
@@ -213,33 +219,7 @@ class Portfolio:
                         volume=acc["volume"],
                     )
 
-                slice_obj = Slice(bars)
-                strategy_failed = False
-                strategy_out = None
-                try:
-                    strategy_out = strategy_instance.on_data(slice_obj, portfolio_view)
-                except Exception as e:
-                    strategy_failed = True
-                    logger.error(f"Strategy {strategy_id} failed: {e}", exc_info=True)
-
-                allocations_dict = None
-                if not strategy_failed:
-                    if isinstance(strategy_out, TargetWeights):
-                        allocations_dict = dict(strategy_out.weights)
-                    elif isinstance(strategy_out, Hold):
-                        allocations_dict = state['last_output']
-                    elif isinstance(strategy_out, Liquidate):
-                        allocations_dict = {}
-                    elif isinstance(strategy_out, dict):
-                        allocations_dict = dict(strategy_out)
-                    elif strategy_out is None:
-                        allocations_dict = None
-                    else:
-                        logger.warning(
-                            "Strategy %s returned unexpected type %s",
-                            strategy_id,
-                            type(strategy_out).__name__,
-                        )
+                state['pending'].append((completed_bar_period, bars))
 
                 for sym in universe:
                     self._bar_aggregate.pop(
@@ -282,13 +262,66 @@ class Portfolio:
                             if tick.volume is not None:
                                 acc["volume"] = (acc["volume"] or 0.0) + tick.volume
 
-                if allocations_dict is not None:
-                    state['last_output'] = allocations_dict
+        # Batch shared series once, only for strategies with completed/pending bars.
+        requested = {
+            series for strategy in self.strategies
+            if self._strategy_state[strategy['id']]['pending']
+            for series in strategy['alt_data']
+        }
+        ready = await self.alt_data.refresh(requested) if requested else set()
+
+        for strategy in self.strategies:
+            strategy_id = strategy['id']
+            strategy_instance = strategy['instance']
+            aum_weight = strategy['weight']
+            state = self._strategy_state[strategy_id]
+            allocations_dict = state['last_output']
+
+            if state['pending']:
+                if not set(strategy['alt_data']) <= ready:
+                    if allocations_dict is None:
+                        logger.warning(f"Strategy {strategy_id}: alternative data unavailable; "
+                                       "no previous allocation, leaving strategy unallocated")
+                    else:
+                        logger.warning(f"Strategy {strategy_id}: alternative data unavailable; "
+                                       "retaining previous allocation")
                 else:
-                    continue
+                    # Only alternative-data fetch failures defer a bar. A failed or
+                    # missing signal keeps the previous target without retrying the call.
+                    completed_bar_period, bars = state['pending'].popleft()
+                    alt_history = self.alt_data.snapshot(strategy['alt_data']) if strategy['alt_data'] else {}
+                    slice_obj = Slice(bars, alt_history=alt_history)
+                    strategy_failed = False
+                    strategy_out = None
+                    try:
+                        strategy_out = strategy_instance.on_data(slice_obj, portfolio_view)
+                    except Exception as e:
+                        strategy_failed = True
+                        logger.error(f"Strategy {strategy_id} failed: {e}", exc_info=True)
+
+                    allocations_dict = state['last_output']
+                    if not strategy_failed:
+                        if isinstance(strategy_out, TargetWeights):
+                            allocations_dict = dict(strategy_out.weights)
+                        elif isinstance(strategy_out, Hold):
+                            allocations_dict = state['last_output']
+                        elif isinstance(strategy_out, Liquidate):
+                            allocations_dict = {}
+                        elif isinstance(strategy_out, dict):
+                            allocations_dict = dict(strategy_out)
+                        elif strategy_out is None:
+                            allocations_dict = state['last_output']
+                        else:
+                            logger.warning(
+                                "Strategy %s returned unexpected type %s",
+                                strategy_id,
+                                type(strategy_out).__name__,
+                            )
+                    if allocations_dict is not None:
+                        state['last_output'] = allocations_dict
 
             if allocations_dict is None:
-                logger.warning(f"Strategy {strategy_id} returned None allocations")
+                logger.warning(f"Strategy {strategy_id}: no previous allocation, leaving strategy unallocated")
                 continue
 
             allocations = list(allocations_dict.items())

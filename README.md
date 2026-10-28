@@ -106,3 +106,67 @@ docker-compose up --build -d
 - **`src/config/portfolio.yaml`**: Portfolio and strategy configuration
   - Define which strategies are active
   - Set portfolio weights for each strategy
+
+## Alternative data for strategies
+
+The engine continues using Alpaca/IBKR snapshots for securities OHLCV. A strategy
+can additionally declare provider-prefixed alternative series in its Python class:
+
+```python
+class MyStrategy(Strategy):
+    universe = ["SPY"]
+    alt_data = ["FRED.GDP", "FRED.DGS10"]
+    # cadence and on_data follow the existing strategy interface.
+```
+
+Read history with `data.alt_series("FRED.GDP")`, or the most recent observation
+with `data.alt_value("FRED.GDP")`. History keys are observation dates in naive UTC;
+they are not publication dates. IDs are normalized to uppercase. Strategies without `alt_data` use the
+existing securities-only input and do not create a datafeed client.
+
+Set these in the engine's `.env` (placeholders are in `.env.example`):
+
+```dotenv
+ALT_DATA_HISTORY_START=2025-01-01
+FRED_API_KEY=your_key_here
+```
+
+The history start is required only when alternative series are declared. It is an
+inclusive observation-date bound, not an indicator warmup period. FRED requires
+an API key; 
+
+Alternative history loads once at startup and refreshes immediately before due
+strategy calls. Shared series are fetched once per decision batch, grouped by
+provider, over the full configured range through today in UTC. Refetching this
+range captures revisions to old observations. There is **no periodic background
+polling**, and repeated rebalances against previous targets do not fetch alternative
+data. Synchronous network calls run in worker threads.
+
+The latest received revision for each observation date is exposed through an
+immutable history snapshot. Provider availability timestamps and actual receipt
+times are kept separately in memory. Live decisions include newly received data.
+Provider timestamps can be estimates rather than measured publication times.
+
+If a fetch fails, the engine retains cached history for inspection, defers affected
+strategy calls, and retries on subsequent engine cycles no sooner than 60 seconds
+after failure. Providers fetch concurrently with an overall deadline of
+`FETCH_TIMEOUT_SECONDS` in `src/alt_data.py` (120 seconds per provider).
+The decision batch waits until each provider finishes or reaches its deadline;
+successful results remain usable when another provider fails or times out.
+Series are fetched individually within each provider worker so one unusable series
+does not discard valid sibling histories. Shared series are still deduplicated.
+
+A timeout does not stop a running thread. The engine retains one worker per provider
+until it exits, shares it across concurrent callers, and starts no replacement while
+it is still running—even after the 60-second retry cooldown expires. Late results
+from timed-out workers are discarded rather than overwriting the cache.
+Completed bars are queued in memory and retried oldest first, at most one pending
+call per strategy per cycle. Deferred historical bars use alternative data known
+at retry time. Pending calls and strategy indicator state do not survive restart.
+Only alternative-data fetch failures retain a bar for retry. Once inputs are
+available, a strategy exception, `None`, unexpected output, or `Hold()` retains
+its last successful target allocation without retrying the strategy call.
+Explicit empty targets and `Liquidate()` still request an allocation to cash.
+
+When alternative data is unavailable, a strategy retains its previous allocation.
+If it has never produced an allocation, it remains unallocated and logs that fact.

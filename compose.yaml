@@ -183,6 +183,8 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      ALT_DATA_HISTORY_START: ${ALT_DATA_HISTORY_START:-}
+      FRED_API_KEY: ${FRED_API_KEY:-}
       NO_PROXY: ${NO_PROXY}
       no_proxy: ${no_proxy}
       PROVIDER_API_URL: http://provider-api:8000

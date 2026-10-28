@@ -73,6 +73,7 @@ async def run():
     """Main engine loop"""
     try:
         portfolio = Portfolio(config_path="config/portfolio.yaml")
+        await portfolio.initialize()
         universe = portfolio.get_tickers()
         
         logger.info(f"Trading universe: {universe}")
