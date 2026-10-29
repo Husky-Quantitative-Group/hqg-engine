@@ -63,3 +63,19 @@ Use the [offline test guide](docs/offline-testing.md) for synthetic credentials,
 Moto, disposable PostgreSQL and Docker isolation checks. No existing volumes are
 deleted or migrated. `docker compose down -v` deletes PostgreSQL history. Manually
 export wanted legacy strategy source and re-upload it through the real dashboard.
+
+## Releases
+
+Merging a PR into `main` releases the service automatically:
+1. `require-bump-label` requires the PR to carry exactly one label.
+2. `release.yml` runs `make test`, builds the image, and tags it `X.Y.Z-<12-hex>`. Each release also gets a git tag `vX.Y.Z`.
+3. It sends `service-released` to `hqg-deployment`, which deploys the image.
+
+Version bump from the label:
+- `breaking`: major (X)
+- `feature`: minor (Y)
+- any other single label: patch (Z)
+
+## Tests
+
+`make test` runs `pytest tests`. Add test files under `tests/`.
