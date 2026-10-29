@@ -64,6 +64,8 @@ services:
       <<: *control-environment
       DASHBOARD_SYNC_SECRET: ${DASHBOARD_SYNC_SECRET:?Set the account service credential}
       DASHBOARD_SYNC_URL: ${DASHBOARD_SYNC_URL:?Set the dashboard control URL}
+      BACKTESTER_URL: http://hqg-backtester:8005
+      BACKTESTER_SERVICE_SECRET: ${BACKTESTER_SERVICE_SECRET:-}
       DATABASE_URL: ${DATABASE_URL}
       NO_PROXY: ${NO_PROXY}
       no_proxy: ${no_proxy}

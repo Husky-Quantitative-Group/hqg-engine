@@ -35,6 +35,7 @@ class Provider:
         timeout=3,
         ttl=15,
         dashboard=None,
+        backtester=None,
     ):
         self.account_id, self.engine_id = str(UUID(account_id)), str(UUID(engine_id))
         if (
@@ -51,6 +52,7 @@ class Provider:
         self.dashboard = dashboard if dashboard is not None else dashboard_client(
             dashboard_url, timeout, {"Authorization": "Bearer " + secret}
         )
+        self.backtester = backtester
         self.boot_id, self.worker_session = str(uuid4()), None
         self.deadline, self.healthy = 0, False
         self.contexts_verified, self.sync_error = False, None
@@ -137,6 +139,8 @@ class Provider:
             await self.persist()
         finally:
             await self.dashboard.aclose()
+            if self.backtester is not None:
+                await self.backtester.aclose()
             for broker in self.brokers.values():
                 await broker.close()
 

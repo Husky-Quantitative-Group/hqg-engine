@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src.control.provider import Provider
 from src.control.runtime import Runtime
-from src.control.transport import brokers_from_environment
+from src.control.transport import bound_client, brokers_from_environment
 
 
 class Context(BaseModel):
@@ -40,6 +40,7 @@ def from_environment():
 
     account_id = os.environ["HQG_ACCOUNT_ID"]
     brokers = brokers_from_environment()
+    backtester_secret = os.environ.get("BACKTESTER_SERVICE_SECRET")
 
     return Provider(
         account_id,
@@ -48,6 +49,11 @@ def from_environment():
         os.environ["DASHBOARD_SYNC_URL"],
         brokers,
         Runtime(async_session, account_id),
+        backtester=bound_client(
+            os.environ["BACKTESTER_URL"],
+            timeout=30,
+            headers={"Authorization": "Bearer " + backtester_secret} if backtester_secret else None,
+        ),
     )
 
 
