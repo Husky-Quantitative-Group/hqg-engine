@@ -150,6 +150,10 @@ class Worker:
                     timestamp, data = fresh[index]
                     targets = await asyncio.to_thread(instance.on_data, data, portfolio)
                     self.last_bars[(mode, index)] = timestamp
+                    if targets is None and (mode, index) not in self.last_weights:
+                        # A cold context holds while it rebuilds indicators; start
+                        # from its backtested decision for this same bar instead.
+                        targets = await self.warmup(instance, timestamp)
                 if targets is None:
                     initial_hold |= (mode, index) not in self.last_weights
                     targets = self.last_weights.get((mode, index), {})
@@ -171,6 +175,21 @@ class Worker:
             )
             raise
         return await self.send_rebalance(context, weights)
+
+    async def warmup(self, instance, timestamp):
+        try:
+            response = await self.client.post(
+                "internal/warmup",
+                json={"source_digest": instance.identity["source_digest"],
+                      "timestamp": timestamp.isoformat()},
+                timeout=340,
+            )
+            response.raise_for_status()
+            weights = response.json()["weights"]
+            return None if weights is None else validate_weights(weights, instance.universe)
+        except Exception as exc:
+            print("Warmup failed:", getattr(instance, "identity", None), repr(exc), flush=True)
+            return None
 
     async def send_rebalance(self, context, weights=None):
         mode = context["mode"]

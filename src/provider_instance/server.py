@@ -1,6 +1,7 @@
 import os
 import secrets
 from contextlib import asynccontextmanager
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Request
@@ -10,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.control.provider import Provider
 from src.control.runtime import Runtime
 from src.control.transport import bound_client, brokers_from_environment
+from src.control.warmup import latest_target
 
 
 class Context(BaseModel):
@@ -33,6 +35,12 @@ class StrategyFailure(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     context: Context
     message: str = Field(max_length=500)
+
+
+class Warmup(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    source_digest: str
+    timestamp: str
 
 
 def from_environment():
@@ -140,6 +148,15 @@ def create_app(provider=None, worker_secret=None, background=True):
         app.state.provider.modes[context["mode"]]["strategy_error"] = body.message
         await app.state.provider.persist()
         return {"state": "paused"}
+
+    @app.post("/internal/warmup")
+    async def warmup(body: Warmup):
+        provider = app.state.provider
+        return {"weights": await latest_target(
+            provider.backtester,
+            provider.packages.get(body.source_digest),
+            datetime.fromisoformat(body.timestamp),
+        )}
 
     return app
 

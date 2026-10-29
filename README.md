@@ -42,7 +42,10 @@ the final session close for bar publication. Repeated or older bar timestamps
 do not advance a strategy. If any universe symbol is missing, the worker waits
 for the complete period instead of mixing dates. New or resumed strategy
 contexts start with the latest eligible completed bar; they do not replay missed
-periods or restore indicator history.
+periods or restore indicator history. A single-file strategy that declares
+`lookback = <bars>` and holds on that first bar instead starts from its
+backtested decision for the bar (best effort; set `BACKTESTER_SERVICE_SECRET`
+when the backtester's auth is on).
 
 `CLOSE_TO_NEXT_OPEN` waits for the following session's open before evaluating the
 completed bar. `CLOSE_TO_CLOSE` evaluates after the completed bar is available;

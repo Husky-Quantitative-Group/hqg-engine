@@ -42,7 +42,7 @@ def strategy(size=BarSize.DAILY, signals=None, universe=None):
 
 
 @asynccontextmanager
-async def worker_context(strategies):
+async def worker_context(strategies, warmup=None):
     broker = Broker()
     worker = Worker("http://127.0.0.1:8013", "test", brokers={"paper": broker, "live": broker})
     await worker.client.aclose()
@@ -60,6 +60,8 @@ async def worker_context(strategies):
             return httpx.Response(200, json=state)
         if request.url.path.endswith("/failure"):
             return httpx.Response(200, json={})
+        if request.url.path.endswith("/warmup"):
+            return httpx.Response(200, json={"weights": warmup(json.loads(request.content))})
         requests.append(json.loads(request.content))
         return httpx.Response(responses.pop(0) if responses else 200, json={"status": "completed"})
 
@@ -197,4 +199,40 @@ class Replacement(Strategy):
             assert requests[-1]["target_weights"] == {"AAPL": 0.2}
             assert requests[-1]["context"]["configuration_digest"] == "replacement"
             assert not worker.pending_rebalances
+    asyncio.run(scenario())
+
+
+def packaged(signals):
+    instance = strategy(signals=signals)
+    instance.identity = {"strategy_id": "probe", "version": 1, "source_digest": "sha256:probe"}
+    return instance
+
+
+def test_cold_hold_is_seeded_from_warmup_once_and_rebalanced():
+    async def scenario():
+        instance = packaged([None, None])
+        warmup = Mock(return_value={"AAPL": 0.5})
+        async with worker_context({"paper": [(instance, 1)]}, warmup) as (worker, broker, _, requests, _):
+            broker.data["1d"] = {"AAPL": bar("2026-10-02T00:00:00-04:00")}
+            await worker.cycle("paper")
+            assert warmup.call_args.args[0] == {
+                "source_digest": "sha256:probe", "timestamp": "2026-10-02T00:00:00-04:00",
+            }
+            assert [r["target_weights"] for r in requests] == [{"AAPL": 0.5}]
+            broker.data["1d"] = {"AAPL": bar("2026-10-05T00:00:00-04:00")}
+            await worker.cycle("paper")  # Hold carries the seed without warming up again.
+            assert warmup.call_count == len(requests) == 1
+            assert worker.last_weights[("paper", 0)] == {"AAPL": 0.5}
+    asyncio.run(scenario())
+
+
+def test_missing_warmup_target_keeps_the_mode_cold():
+    async def scenario():
+        instance = packaged([None])
+        warmup = Mock(return_value=None)
+        async with worker_context({"paper": [(instance, 1)]}, warmup) as (worker, broker, _, requests, _):
+            broker.data["1d"] = {"AAPL": bar("2026-10-02T00:00:00-04:00")}
+            assert await worker.cycle("paper") is None
+            assert warmup.call_count == 1
+            assert not requests and not worker.last_weights
     asyncio.run(scenario())
