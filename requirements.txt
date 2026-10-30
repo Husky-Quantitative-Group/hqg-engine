@@ -14,3 +14,6 @@ httpx==0.28.1
 httpcore==1.0.9
 docker==7.2.0
 pytest
+scikit-learn==1.9.1
+cvxpy==1.9.3
+cma==4.5.0
