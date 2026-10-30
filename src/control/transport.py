@@ -117,6 +117,14 @@ class SDKAdapter(HTTPAdapter):
             **self.poolmanager.pool_classes_by_scheme, "https": AdmissionPool,
         }
 
+    def proxy_manager_for(self, proxy, **proxy_kwargs):
+        # Proxied requests use a separate pool manager; it keeps the admission hook.
+        manager = super().proxy_manager_for(proxy, **proxy_kwargs)
+        manager.pool_classes_by_scheme = {
+            **manager.pool_classes_by_scheme, "https": AdmissionPool,
+        }
+        return manager
+
     def send(self, request, **kwargs):
         kwargs["timeout"] = kwargs.get("timeout") or self.timeout
         return super().send(request, **kwargs)
@@ -126,7 +134,8 @@ class Broker:
     """Adapt the existing Alpaca SDK clients to the gated execution interface."""
 
     def __init__(
-        self, mode, api_key, secret_key, *, account_id=None, feed="iex", timeout=10
+        self, mode, api_key, secret_key, *, account_id=None, feed="iex", timeout=10,
+        proxy=None,
     ):
         if mode not in ("paper", "live"):
             raise ValueError("Explicit mode required")
@@ -134,6 +143,10 @@ class Broker:
             raise ValueError(f"Alpaca {mode} API key and secret are required")
         if feed not in {"iex", "sip"}:
             raise ValueError("ALPACA_DATA_FEED must be iex or sip")
+        if proxy:
+            parsed = urlsplit(proxy)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                raise ValueError("ALPACA_PROXY_URL must be an http or https proxy URL")
         self.mode, self.feed = mode, feed
         self.account_id = str(UUID(account_id)) if account_id else None
         self.trading = AlpacaExecutor(
@@ -147,7 +160,9 @@ class Broker:
             # No SDK resubmission of orders with uncertain outcomes. The provider
             # owns reconciliation and retries; SDK requests have bounded timeouts.
             client._retry = 0
+            # Only an explicit proxy is used; the proxy environment variables are not.
             client._session.trust_env = False
+            client._session.proxies = {"https": proxy} if proxy else {}
             client._session.mount("https://", SDKAdapter(timeout))
 
     async def call(self, function, *args, before_send=None):
@@ -262,7 +277,7 @@ class Broker:
 
 
 def brokers_from_environment():
-    """Use the existing key pair and ALPACA_PAPER mode selector."""
+    """Use the existing key pair, ALPACA_PAPER mode selector and optional proxy."""
     key = os.environ.get("ALPACA_API_KEY")
     secret = os.environ.get("ALPACA_SECRET_KEY")
     if not key or not secret:
@@ -272,7 +287,8 @@ def brokers_from_environment():
         raise ValueError("ALPACA_PAPER must be true or false")
     mode = "paper" if paper == "true" else "live"
     feed = os.environ.get("ALPACA_DATA_FEED", "iex")
-    return {mode: Broker(mode, key, secret, feed=feed)}
+    proxy = os.environ.get("ALPACA_PROXY_URL", "").strip() or None
+    return {mode: Broker(mode, key, secret, feed=feed, proxy=proxy)}
 
 
 class BrokerReader:

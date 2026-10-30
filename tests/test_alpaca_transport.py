@@ -196,6 +196,58 @@ def test_environment_rejects_invalid_paper_selector(monkeypatch):
         brokers_from_environment()
 
 
+@pytest.mark.parametrize("proxy,connections", [
+    (None, [("paper-api.alpaca.markets", None), ("data.alpaca.markets", None)]),
+    ("", [("paper-api.alpaca.markets", None), ("data.alpaca.markets", None)]),
+    (" http://proxy.test:3128 ", [
+        ("proxy.test", "paper-api.alpaca.markets"), ("proxy.test", "data.alpaca.markets"),
+    ]),
+])
+def test_environment_proxy_is_the_only_proxy_both_clients_use(monkeypatch, proxy, connections):
+    monkeypatch.setenv("ALPACA_API_KEY", "test-key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "test-secret")
+    monkeypatch.delenv("ALPACA_PAPER", raising=False)
+    monkeypatch.delenv("ALPACA_DATA_FEED", raising=False)
+    monkeypatch.setenv("https_proxy", "http://environment-proxy.test:3128")
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    if proxy is None:
+        monkeypatch.delenv("ALPACA_PROXY_URL", raising=False)
+    else:
+        monkeypatch.setenv("ALPACA_PROXY_URL", proxy)
+    seen = []
+
+    def connect(self):
+        # The host connected to, and the host tunnelled to through it, if any.
+        seen.append((self.host, self._tunnel_host))
+        raise ConnectionRefusedError("Injected connection refusal")
+
+    monkeypatch.setattr(HTTPSConnection, "connect", connect)
+
+    async def scenario():
+        broker = brokers_from_environment()["paper"]
+        try:
+            with pytest.raises(requests.RequestException):
+                await broker.request("GET", "v2/account")
+            with pytest.raises(requests.RequestException):
+                await broker.quotes(["SPY"])
+            assert seen == connections
+        finally:
+            await broker.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("proxy", ["proxy.test:3128", "socks5://proxy.test:1080", "http://:3128"])
+def test_environment_rejects_invalid_proxy(monkeypatch, proxy):
+    monkeypatch.setenv("ALPACA_API_KEY", "test-key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "test-secret")
+    monkeypatch.delenv("ALPACA_PAPER", raising=False)
+    monkeypatch.setenv("ALPACA_PROXY_URL", proxy)
+    with pytest.raises(ValueError, match="ALPACA_PROXY_URL must be an http or https proxy URL"):
+        brokers_from_environment()
+
+
 def test_sdk_does_not_retry_orders_after_uncertain_response(monkeypatch):
     seen = []
 
@@ -218,19 +270,20 @@ def test_sdk_does_not_retry_orders_after_uncertain_response(monkeypatch):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("proxy", [None, "http://proxy.test:3128"])
 @pytest.mark.parametrize("failure", [
     ConnectionRefusedError("Injected connection refusal"),
     ConnectTimeoutError("Injected connection timeout"),
     SSLError("Injected TLS failure"),
 ])
-def test_sdk_identifies_order_failures_before_transmission(monkeypatch, failure):
+def test_sdk_identifies_order_failures_before_transmission(monkeypatch, failure, proxy):
     def connect(self):
         raise failure
 
     monkeypatch.setattr(HTTPSConnection, "connect", connect)
 
     async def scenario():
-        broker, admit = Broker("paper", "key", "secret"), Mock()
+        broker, admit = Broker("paper", "key", "secret", proxy=proxy), Mock()
         try:
             with pytest.raises(OrderNotSubmitted):
                 await broker.request("POST", "v2/orders", json={}, before_send=admit)
@@ -259,6 +312,34 @@ def test_sdk_keeps_failures_after_submission_begins_uncertain(monkeypatch, failu
             with pytest.raises(requests.RequestException):
                 await broker.request("POST", "v2/orders", json={}, before_send=admit)
             admit.assert_called_once_with()
+        finally:
+            await broker.close()
+
+    asyncio.run(scenario())
+
+
+def test_sdk_orders_through_a_proxy_keep_the_admission_check(monkeypatch):
+    monkeypatch.setattr(AdmissionPool, "_validate_conn", lambda *args: None)
+    tunnels = []
+
+    def connect(self):
+        tunnels.append((self.host, self._tunnel_host))
+
+    def write(self, *args, **kwargs):
+        raise requests.ConnectionError("Injected failure after admission")
+
+    monkeypatch.setattr(HTTPSConnection, "connect", connect)
+    monkeypatch.setattr(HTTPSConnection, "request", write)
+
+    async def scenario():
+        broker = Broker("paper", "key", "secret", proxy="http://proxy.test:3128")
+        admit = Mock()
+        try:
+            # Admitted, so the failure is uncertain rather than OrderNotSubmitted.
+            with pytest.raises(requests.RequestException):
+                await broker.request("POST", "v2/orders", json={}, before_send=admit)
+            admit.assert_called_once_with()
+            assert tunnels == [("proxy.test", "paper-api.alpaca.markets")]
         finally:
             await broker.close()
 
