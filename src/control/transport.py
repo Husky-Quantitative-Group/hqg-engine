@@ -4,7 +4,7 @@ import asyncio
 import math
 import os
 import threading
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from contextvars import ContextVar
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -19,6 +19,12 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.requests import GetCalendarRequest
 
 from src.control.cadence import MARKET_ZONE, completed_period
+
+HISTORY_TIMEFRAMES = {
+    "1d": TimeFrame.Day, "1w": TimeFrame.Week, "1m": TimeFrame.Month,
+    "1q": TimeFrame(3, TimeFrameUnit.Month),
+}
+HISTORY_DAYS_PER_BAR = {"1d": 2, "1w": 7, "1m": 31, "1q": 92}
 
 from src.execution_provider.alpaca import AlpacaExecutor
 from src.marketdata_provider.alpaca import AlpacaMarketData
@@ -256,6 +262,44 @@ class Broker:
         self.bar_cache[bar_size] = (start, cached)
         return {symbol: cached[symbol] for symbol in symbols}
 
+    async def history(self, symbols, bar_size, before, count):
+        """The last `count` bars every symbol shares before `before`, oldest first."""
+        bars = await self.call(
+            self.data.get_stock_bars,
+            StockBarsRequest(
+                symbol_or_symbols=symbols, feed=self.feed,
+                timeframe=HISTORY_TIMEFRAMES[bar_size],
+                # Calendar days per bar are generous so holidays never shorten the window.
+                start=before - timedelta(days=count * HISTORY_DAYS_PER_BAR[bar_size] + 14),
+                end=before,
+            ),
+        )
+        series = {
+            symbol: {bar.timestamp: bar for bar in bars.data.get(symbol, []) if bar.timestamp < before}
+            for symbol in symbols
+        }
+        shared = sorted(set.intersection(*(set(bars) for bars in series.values())))[-count:]
+        result = [
+            {
+                "timestamp": timestamp.isoformat(),
+                "bars": {
+                    symbol: {
+                        key: float(getattr(series[symbol][timestamp], key))
+                        for key in ("open", "high", "low", "close", "volume")
+                    }
+                    for symbol in symbols
+                },
+            }
+            for timestamp in shared
+        ]
+        if any(
+            not math.isfinite(value) or value < 0 or (key != "volume" and value == 0)
+            for entry in result for bar in entry["bars"].values()
+            for key, value in bar.items()
+        ):
+            raise ValueError("Alpaca returned invalid bars")
+        return result
+
     async def close(self):
         for client in (self.trading, self.data):
             await self.call(client._session.close)
@@ -303,6 +347,12 @@ class BrokerReader:
     async def bars(self, symbols, bar_size="1d", execution="close_to_close"):
         return await self.get(
             "bars", symbols=",".join(symbols), bar_size=bar_size, execution=execution
+        )
+
+    async def history(self, symbols, bar_size, before, count):
+        return await self.get(
+            "history", symbols=",".join(symbols), bar_size=bar_size,
+            before=before.isoformat(), count=count,
         )
 
     async def close(self):

@@ -1,6 +1,7 @@
 import os
 import secrets
 from contextlib import asynccontextmanager
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Request
@@ -88,6 +89,25 @@ def create_app(provider=None, worker_secret=None, background=True):
     @app.post("/internal/sessions/{session_id}")
     async def register(session_id: UUID):
         return await app.state.provider.register_worker(str(session_id))
+
+    # Registered before the generic broker read so "history" never reaches it.
+    @app.get("/internal/broker/{mode}/history")
+    async def broker_history(mode: str, symbols: str, bar_size: str, before: str, count: int):
+        broker = app.state.provider.brokers.get(mode)
+        if broker is None:
+            raise HTTPException(409, "Alpaca mode is not configured")
+        tickers = symbols.split(",") if symbols else []
+        if not tickers or len(tickers) > 200:
+            raise HTTPException(400, "1-200 symbols required")
+        if bar_size not in {"1d", "1w", "1m", "1q"} or not 1 <= count <= 1000:
+            raise HTTPException(400, "Unsupported lookback history")
+        try:
+            end = datetime.fromisoformat(before)
+        except ValueError:
+            end = None
+        if end is None or end.tzinfo is None:
+            raise HTTPException(400, "A timezone-aware bar timestamp is required")
+        return await broker.history(tickers, bar_size, end, count)
 
     @app.get("/internal/broker/{mode}/{resource}")
     async def broker_read(
