@@ -148,6 +148,8 @@ class Worker:
                 targets = None
                 if index in fresh:
                     timestamp, data = fresh[index]
+                    if getattr(instance, "lookback", None) is not None and (mode, index) not in self.last_bars:
+                        await self.replay(broker, instance, timestamp, portfolio)
                     targets = await asyncio.to_thread(instance.on_data, data, portfolio)
                     self.last_bars[(mode, index)] = timestamp
                 if targets is None:
@@ -171,6 +173,19 @@ class Worker:
             )
             raise
         return await self.send_rebalance(context, weights)
+
+    async def replay(self, broker, instance, timestamp, portfolio):
+        """Rebuild a fresh strategy's state from the bars before its first live bar."""
+        count = instance.lookback
+        if type(count) is not int or not 1 <= count <= 1000:
+            raise ValueError("lookback must be an integer from 1 to 1000")
+        history = await broker.history(
+            instance.universe, instance.cadence.bar_size.value, timestamp, count,
+        )
+        if len(history) < count:
+            raise ValueError(f"lookback needs {count} bars; Alpaca returned {len(history)}")
+        for entry in history:  # Oldest first; replayed signals are discarded.
+            await asyncio.to_thread(instance.on_data, entry["bars"], portfolio)
 
     async def send_rebalance(self, context, weights=None):
         mode = context["mode"]
