@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from hqg_algorithms import get_strategy_metadata
 
-from src.control.packages import validate_package
+from src.control.packages import declared_lookback, validate_package
 
 
 def validate_weights(weights, universe):
@@ -34,6 +34,9 @@ class Sandbox:
         self.identity, metadata = validate_package(package)
         self.universe = metadata["universe"]
         self.cadence = get_strategy_metadata(package["files"][package["entrypoint"]]).cadence
+        self.lookback = declared_lookback(
+            package["files"][package["entrypoint"]], metadata["class_name"]
+        )
         self.package, self.timeout = package, timeout
         self.image = image or os.environ.get(
             "STRATEGY_SANDBOX_IMAGE", "hqg-engine-local"

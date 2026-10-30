@@ -34,6 +34,28 @@ def validate_files(files):
         raise ValueError("Strategy package exceeds 128 KB")
 
 
+def declared_lookback(code, class_name):
+    """Return the Strategy's `lookback = <value>` declaration, or None. Never executes code."""
+    for node in ast.parse(code).body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for item in node.body:
+                if (
+                    isinstance(item, (ast.Assign, ast.AnnAssign))
+                    and item.value is not None
+                    and any(
+                        isinstance(target, ast.Name) and target.id == "lookback"
+                        for target in (
+                            item.targets if isinstance(item, ast.Assign) else [item.target]
+                        )
+                    )
+                ):
+                    try:
+                        return ast.literal_eval(item.value)
+                    except ValueError:
+                        return ast.unparse(item.value)  # Rejected by the worker.
+    return None
+
+
 def validate_package(package):
     if set(package) != {"strategy_id", "version", "entrypoint", "files"}:
         raise ValueError("Invalid strategy package")
