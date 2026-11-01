@@ -48,6 +48,7 @@ def from_environment():
         os.environ["DASHBOARD_SYNC_URL"],
         brokers,
         Runtime(async_session, account_id),
+        dashboard_proxy=os.environ.get("DASHBOARD_PROXY_URL", "").strip() or None,
     )
 
 

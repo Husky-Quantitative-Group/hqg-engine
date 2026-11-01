@@ -1,6 +1,7 @@
-"""HTTPS policy and provider delivery with an explicit test-only client."""
+"""HTTPS and proxy policy, and provider delivery with an explicit test-only client."""
 
 import asyncio
+import contextlib
 import json
 from uuid import uuid4
 
@@ -10,6 +11,7 @@ import pytest
 from src.control.provider import Provider
 from src.control.packages import validate_package
 from src.control.transport import dashboard_client
+from src.provider_instance import server
 
 
 @pytest.mark.parametrize(
@@ -27,9 +29,16 @@ def test_dashboard_requires_https_without_embedded_credentials(url):
         dashboard_client(url)
 
 
-def test_dashboard_preserves_stage_tls_origin_and_retry_policy():
+@pytest.mark.parametrize("proxy", ["proxy.test:3128", "socks5://proxy.test:1080", "http://:3128"])
+def test_dashboard_rejects_invalid_proxy(proxy):
+    with pytest.raises(ValueError, match="DASHBOARD_PROXY_URL"):
+        dashboard_client("https://api.test/dev/", proxy=proxy)
+
+
+@pytest.mark.parametrize("proxy", [None, "http://proxy.test:3128"])
+def test_dashboard_preserves_stage_tls_origin_and_retry_policy(proxy):
     async def scenario():
-        async with dashboard_client("https://api.test/dev/") as client:
+        async with dashboard_client("https://api.test/dev/", proxy=proxy) as client:
             assert (
                 str(client.build_request("GET", "internal/v1/accounts/id/sync").url)
                 == "https://api.test/dev/internal/v1/accounts/id/sync"
@@ -42,6 +51,42 @@ def test_dashboard_preserves_stage_tls_origin_and_retry_policy():
                 await client.get("https://other.test/escape")
 
     asyncio.run(scenario())
+
+
+@contextlib.asynccontextmanager
+async def refusing_proxy():
+    """A local HTTP proxy that records each request line and refuses the request."""
+    request_lines = []
+
+    async def refuse(reader, writer):
+        request_lines.append((await reader.readline()).decode().strip())
+        writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+        await writer.drain()
+        writer.close()
+
+    listener = await asyncio.start_server(refuse, "127.0.0.1", 0)
+    async with listener:
+        yield f"http://127.0.0.1:{listener.sockets[0].getsockname()[1]}", request_lines
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_dashboard_uses_only_its_explicit_proxy(monkeypatch, explicit):
+    async def scenario():
+        async with refusing_proxy() as (proxy, request_lines):
+            # The proxy environment variables name the same proxy; they must be ignored.
+            for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+                monkeypatch.setenv(name, proxy)
+            for name in ("NO_PROXY", "no_proxy"):
+                monkeypatch.delenv(name, raising=False)
+            # Without the proxy, the request fails fast on a closed local port.
+            url = "https://api.test/dev/" if explicit else "https://127.0.0.1:1/dev/"
+            async with dashboard_client(url, proxy=proxy if explicit else None) as client:
+                with pytest.raises(httpx.ProxyError if explicit else httpx.ConnectError):
+                    await client.get("internal/v1/accounts/id/sync")
+        return request_lines
+
+    expected = ["CONNECT api.test:443 HTTP/1.1"] if explicit else []
+    assert asyncio.run(scenario()) == expected
 
 
 class Runtime:
@@ -140,3 +185,44 @@ def test_failed_download_keeps_cache_and_acknowledges_only_complete_set(failure)
             assert len(calls) == 3
 
     asyncio.run(scenario())
+
+
+def test_provider_syncs_through_the_dashboard_proxy():
+    async def scenario():
+        async with refusing_proxy() as (proxy, request_lines):
+            provider = Provider(
+                str(uuid4()),
+                str(uuid4()),
+                "test-secret",
+                "https://api.test/stage",
+                {"paper": Broker()},
+                Runtime(),
+                dashboard_proxy=proxy,
+            )
+            try:
+                assert not await provider.sync_once()
+            finally:
+                await provider.dashboard.aclose()
+        return provider.sync_error, request_lines
+
+    assert asyncio.run(scenario()) == ("ProxyError", ["CONNECT api.test:443 HTTP/1.1"])
+
+
+@pytest.mark.parametrize("value,proxy", [
+    (None, None), ("", None), (" http://proxy.test:3128 ", "http://proxy.test:3128"),
+])
+def test_environment_supplies_the_optional_dashboard_proxy(monkeypatch, value, proxy):
+    for name, setting in {
+        "HQG_ACCOUNT_ID": str(uuid4()),
+        "HQG_ENGINE_ID": str(uuid4()),
+        "DASHBOARD_SYNC_SECRET": "test-secret",
+        "DASHBOARD_SYNC_URL": "https://api.test/stage",
+        "DASHBOARD_PROXY_URL": value,
+    }.items():
+        if setting is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, setting)
+    monkeypatch.setattr(server, "brokers_from_environment", dict)
+    monkeypatch.setattr(server, "Provider", lambda *args, **kwargs: kwargs)
+    assert server.from_environment() == {"dashboard_proxy": proxy}

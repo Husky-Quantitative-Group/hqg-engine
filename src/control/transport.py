@@ -24,9 +24,19 @@ from src.execution_provider.alpaca import AlpacaExecutor
 from src.marketdata_provider.alpaca import AlpacaMarketData
 
 
+def explicit_proxy(proxy, setting):
+    """Validate an optional proxy URL. The proxy environment variables are never used."""
+    if not proxy:
+        return None
+    parsed = urlsplit(proxy)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(f"{setting} must be an http or https proxy URL")
+    return proxy
+
+
 class OriginTransport(httpx.AsyncHTTPTransport):
-    def __init__(self, origins):
-        super().__init__(retries=0)
+    def __init__(self, origins, proxy=None):
+        super().__init__(retries=0, proxy=proxy)
         self.origins = origins
 
     async def handle_async_request(self, request):
@@ -40,7 +50,7 @@ class OriginTransport(httpx.AsyncHTTPTransport):
         return await super().handle_async_request(request)
 
 
-def bound_client(url, timeout=3, headers=None):
+def bound_client(url, timeout=3, headers=None, proxy=None):
     parsed = urlsplit(url)
     origin = (
         parsed.scheme,
@@ -53,11 +63,11 @@ def bound_client(url, timeout=3, headers=None):
         trust_env=False,
         follow_redirects=False,
         headers=headers,
-        transport=OriginTransport({origin}),
+        transport=OriginTransport({origin}, proxy),
     )
 
 
-def dashboard_client(url, timeout=3, headers=None):
+def dashboard_client(url, timeout=3, headers=None, proxy=None):
     parsed = urlsplit(url)
     if (
         parsed.scheme != "https" or not parsed.hostname or parsed.username
@@ -66,7 +76,9 @@ def dashboard_client(url, timeout=3, headers=None):
         raise ValueError(
             "An HTTPS dashboard URL without credentials, query or fragment is required"
         )
-    return bound_client(url, timeout, headers)
+    return bound_client(
+        url, timeout, headers, explicit_proxy(proxy, "DASHBOARD_PROXY_URL")
+    )
 
 
 def local_client(url, timeout=3, headers=None):
@@ -143,10 +155,7 @@ class Broker:
             raise ValueError(f"Alpaca {mode} API key and secret are required")
         if feed not in {"iex", "sip"}:
             raise ValueError("ALPACA_DATA_FEED must be iex or sip")
-        if proxy:
-            parsed = urlsplit(proxy)
-            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-                raise ValueError("ALPACA_PROXY_URL must be an http or https proxy URL")
+        proxy = explicit_proxy(proxy, "ALPACA_PROXY_URL")
         self.mode, self.feed = mode, feed
         self.account_id = str(UUID(account_id)) if account_id else None
         self.trading = AlpacaExecutor(

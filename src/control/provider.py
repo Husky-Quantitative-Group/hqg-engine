@@ -35,6 +35,7 @@ class Provider:
         timeout=3,
         ttl=15,
         dashboard=None,
+        dashboard_proxy=None,
     ):
         self.account_id, self.engine_id = str(UUID(account_id)), str(UUID(engine_id))
         if (
@@ -49,7 +50,7 @@ class Provider:
         self.secret, self.brokers, self.runtime = secret, brokers, runtime
         self.interval, self.timeout, self.max_ttl = interval, timeout, ttl
         self.dashboard = dashboard if dashboard is not None else dashboard_client(
-            dashboard_url, timeout, {"Authorization": "Bearer " + secret}
+            dashboard_url, timeout, {"Authorization": "Bearer " + secret}, dashboard_proxy
         )
         self.boot_id, self.worker_session = str(uuid4()), None
         self.deadline, self.healthy = 0, False

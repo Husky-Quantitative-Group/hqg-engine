@@ -35,9 +35,9 @@ docker compose down
 `down` keeps the local databases. Alpaca keys are passed only to the provider;
 strategy containers have no credentials, host mounts, or network access.
 
-The provider connects to Alpaca directly, ignoring the proxy variables. If the host
-reaches Alpaca only through a proxy, set `ALPACA_PROXY_URL` to it, e.g.
-`http://proxy.example.edu:3128`.
+The provider connects to Alpaca and the dashboard directly, ignoring the proxy
+variables. If the host reaches them only through a proxy, set `ALPACA_PROXY_URL`
+and `DASHBOARD_PROXY_URL` to it, e.g. `http://proxy.example.edu:3128`.
 
 Strategies receive completed historical bars at their declared daily, weekly,
 monthly or quarterly cadence (daily by default). The provider uses Alpaca's
