@@ -24,6 +24,7 @@ class _ProviderFetch:
     deadline: float
     expired: bool = False
     ready: set[str] | None = None
+    starts: dict[str, datetime] | None = None
 
 
 def normalize_series(ids):
@@ -41,17 +42,31 @@ def normalize_series(ids):
     return result
 
 
+def select_history(records, before=None):
+    history, releases = {}, {}
+    if before is not None and before.tzinfo is None:
+        raise ValueError("Replay clock requires a timezone")
+    for row in records:
+        released = datetime.fromisoformat(row['available_at'])
+        if before is not None and released >= before:
+            continue
+        observation = row['date']
+        if observation not in releases or released >= releases[observation]:
+            history[observation] = row['value']
+            releases[observation] = released
+    return dict(sorted(history.items()))
+
+
 class AlternativeData:
     def __init__(self, ids, *, feed=None, history_start=None, clock=time.monotonic,
                  fetch_timeout=None):
         self.ids = normalize_series(ids)
-        value = history_start if history_start is not None else os.getenv("ALT_DATA_HISTORY_START")
         try:
-            self.start = datetime.combine(date.fromisoformat(value), datetime.min.time())
+            self.start = datetime.combine(date.fromisoformat(history_start), datetime.min.time())
         except (TypeError, ValueError):
-            raise ValueError("ALT_DATA_HISTORY_START must be a YYYY-MM-DD date") from None
+            raise ValueError("history_start must be a YYYY-MM-DD date") from None
         if self.start.date() > datetime.now(timezone.utc).date():
-            raise ValueError("ALT_DATA_HISTORY_START cannot be in the future")
+            raise ValueError("history_start cannot be in the future")
         try:
             self.fetch_timeout = float(fetch_timeout if fetch_timeout is not None else
                                        FETCH_TIMEOUT_SECONDS)
@@ -70,19 +85,20 @@ class AlternativeData:
         self.histories = {}
         self.available_at = {}
         self.received_at = {}
+        self.vintages = {}
         self._retry_after = {}
         self._clock = clock
         self._inflight: dict[str, _ProviderFetch] = {}
 
     @staticmethod
-    def _prepare(frame):
+    def _versions(frame):
         if frame.empty or not {"value", "available_at"} <= set(frame.columns):
             raise ValueError("Alternative history requires nonempty value/available_at columns")
         observations = pd.to_datetime(frame.index, utc=True, errors="raise")
         availability = pd.to_datetime(frame["available_at"], utc=True, errors="raise")
         if observations.isna().any() or availability.isna().any():
             raise ValueError("Alternative history contains missing timestamps")
-        history, releases = {}, {}
+        versions = []
         for observation, released, value in zip(observations, availability, frame["value"]):
             value = float(value)
             if not math.isfinite(value):
@@ -90,6 +106,17 @@ class AlternativeData:
             # Slice/backtester histories use timezone-naive UTC observation dates.
             observation = observation.tz_localize(None).to_pydatetime()
             released = released.to_pydatetime()
+            versions.append((observation, released, value))
+        return tuple(versions)
+
+    @classmethod
+    def _prepare(cls, frame):
+        return cls._select_versions(cls._versions(frame))
+
+    @staticmethod
+    def _select_versions(versions):
+        history, releases = {}, {}
+        for observation, released, value in versions:
             # Only use availability to choose the newest revision of a duplicate date.
             if observation in releases and released < releases[observation]:
                 continue
@@ -100,13 +127,14 @@ class AlternativeData:
         releases = {observation: releases[observation] for observation in history}
         return MappingProxyType(history), MappingProxyType(releases)
 
-    def _fetch_provider(self, ids, end):
+    def _fetch_provider(self, ids, end, starts=None):
         # DataFeed's public batch API raises on any failed series. Separate calls
         # preserve partial success without changing that API's strict contract.
         results = {}
         for series in ids:
             try:
-                results[series] = self.feed.get_alt_data([series], start=self.start, end=end)[series]
+                start = starts[series] if starts is not None else self.start
+                results[series] = self.feed.get_alt_data([series], start=start, end=end)[series]
             except Exception as exc:
                 results[series] = exc
         return results
@@ -130,7 +158,8 @@ class AlternativeData:
                 frame = frames[series]
                 if isinstance(frame, Exception):
                     raise frame
-                history, releases = self._prepare(frame)
+                versions = self._versions(frame)
+                history, releases = self._select_versions(versions)
             except Exception:
                 self._retry_after[series] = self._clock() + 60
                 logger.exception("Alternative history unavailable for %s; retry in 60s", series)
@@ -138,15 +167,16 @@ class AlternativeData:
             self.histories[series] = history
             self.available_at[series] = releases
             self.received_at[series] = received
+            self.vintages[series] = versions
             self._retry_after.pop(series, None)
             ready.add(series)
         logger.info("Refreshed alternative series %s at %s", sorted(ready), received.isoformat())
         request.ready = ready
         return ready
 
-    async def _refresh_provider(self, provider, ids):
+    async def _refresh_provider(self, provider, ids, starts=None):
         try:
-            return await self._await_provider(provider, ids)
+            return await self._await_provider(provider, ids, starts)
         except asyncio.CancelledError:
             # Cancellation of refresh/shutdown must propagate. A worker that
             # cancelled itself is a provider failure, not caller cancellation.
@@ -166,7 +196,7 @@ class AlternativeData:
             self._retry_after[series] = self._clock() + 60
         return set()
 
-    async def _await_provider(self, provider, ids):
+    async def _await_provider(self, provider, ids, starts=None):
         loop = asyncio.get_running_loop()
         request = self._inflight.get(provider)
         if request is not None and request.task.done() and (
@@ -175,10 +205,10 @@ class AlternativeData:
             request = None
         if request is None:
             end = datetime.now(timezone.utc).replace(tzinfo=None)
-            task = asyncio.create_task(asyncio.to_thread(self._fetch_provider, tuple(ids), end))
+            task = asyncio.create_task(asyncio.to_thread(self._fetch_provider, tuple(ids), end, starts))
             # Retrieve late errors even if all waiters timed out or were cancelled.
             task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
-            request = _ProviderFetch(task, tuple(ids), loop.time() + self.fetch_timeout)
+            request = _ProviderFetch(task, tuple(ids), loop.time() + self.fetch_timeout, starts=starts)
             # No await before registration: concurrent callers share one worker/provider.
             self._inflight[provider] = request
         if request.expired:
@@ -196,19 +226,38 @@ class AlternativeData:
         if request.expired or loop.time() > request.deadline:
             self._expire(provider, request)
             return set()
-        return self._publish(request) & set(ids)
+        covered = {
+            series for series in ids if series in request.ids and (
+                (request.starts or {}).get(series, self.start) <= (starts or {}).get(series, self.start)
+            )
+        }
+        return self._publish(request) & covered
 
-    async def refresh(self, ids):
+    async def refresh(self, ids, *, starts=None):
         """Fetch providers concurrently, with one worker and deadline per provider."""
+        if starts is not None:
+            starts = {series: datetime.combine(date.fromisoformat(starts[series]), datetime.min.time())
+                      for series in ids}
+            if any(start.date() > datetime.now(timezone.utc).date() for start in starts.values()):
+                raise ValueError("History starts cannot be in the future")
         groups = defaultdict(list)
         for series in sorted(set(ids)):
             if self._clock() >= self._retry_after.get(series, 0):
                 groups[series.split(".", 1)[0]].append(series)
         results = await asyncio.gather(*(
-            self._refresh_provider(provider, series_ids)
+            self._refresh_provider(provider, series_ids, starts)
             for provider, series_ids in groups.items()
         ))
         return set().union(*results)
 
     def snapshot(self, ids):
         return MappingProxyType({series: self.histories[series] for series in ids})
+
+    def records(self, ids):
+        return {
+            series: [
+                {'date': date.isoformat(), 'available_at': released.isoformat(), 'value': value}
+                for date, released, value in self.vintages[series]
+            ]
+            for series in ids
+        }
