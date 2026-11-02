@@ -5,7 +5,7 @@ from threading import Event
 import pandas as pd
 import pytest
 
-from src.alt_data import AlternativeData, _ProviderFetch, normalize_series
+from src.alt_data import AlternativeData, _ProviderFetch, normalize_series, select_history
 
 
 def frame(value=1.0):
@@ -36,9 +36,8 @@ def test_normalization_and_configuration(monkeypatch):
     for invalid in [['GDP'], [''], [None], 'FRED.GDP']:
         with pytest.raises(ValueError):
             normalize_series(invalid)
-    monkeypatch.delenv('ALT_DATA_HISTORY_START', raising=False)
     for start in [None, 'bad', '9999-01-01']:
-        with pytest.raises(ValueError, match='ALT_DATA_HISTORY_START'):
+        with pytest.raises(ValueError, match='history_start'):
             AlternativeData(['FRED.GDP'], feed=Feed(), history_start=start)
     with pytest.raises(ValueError, match='Unsupported'):
         AlternativeData(['UNKNOWN.GDP'], feed=Feed(), history_start='2020-01-01')
@@ -68,6 +67,49 @@ def test_provider_failure_cooldown_and_recovery():
         assert all(call[1] == datetime(2020, 1, 1) for call in feed.calls)
         with pytest.raises(TypeError):
             old['FRED.GDP'][datetime(2024, 1, 1)] = 7
+    asyncio.run(scenario())
+
+
+def test_each_series_fetch_uses_current_requested_start():
+    async def scenario():
+        feed = Feed()
+        cache = AlternativeData(['FRED.GDP', 'FRED.CPI'], feed=feed, history_start='2020-01-01')
+        assert await cache.refresh(cache.ids, starts={
+            'FRED.GDP': '2023-12-01', 'FRED.CPI': '2023-12-20',
+        }) == set(cache.ids)
+        assert [(ids, start) for ids, start, _ in feed.calls] == [
+            (['FRED.CPI'], datetime(2023, 12, 20)), (['FRED.GDP'], datetime(2023, 12, 1)),
+        ]
+        await cache.refresh(['FRED.GDP'], starts={'FRED.GDP': '2023-12-02'})
+        assert feed.calls[-1][1] == datetime(2023, 12, 2)
+    asyncio.run(scenario())
+
+
+def test_inflight_short_window_does_not_satisfy_longer_window():
+    async def scenario():
+        entered, release = Event(), Event()
+        feed = Feed()
+        original = feed.get_alt_data
+
+        def fetch(*args, **kwargs):
+            entered.set()
+            release.wait(5)
+            return original(*args, **kwargs)
+
+        feed.get_alt_data = fetch
+        cache = AlternativeData(['FRED.GDP'], feed=feed, history_start='2020-01-01')
+        narrow = asyncio.create_task(cache.refresh(['FRED.GDP'], starts={'FRED.GDP': '2023-12-20'}))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            wide = asyncio.create_task(cache.refresh(['FRED.GDP'], starts={'FRED.GDP': '2023-12-01'}))
+            await asyncio.sleep(0)
+        finally:
+            release.set()
+        assert await narrow == {'FRED.GDP'}
+        assert await wide == set()
+        assert len(feed.calls) == 1
+        assert await cache.refresh(['FRED.GDP'], starts={'FRED.GDP': '2023-12-01'}) == {'FRED.GDP'}
+        assert feed.calls[-1][1] == datetime(2023, 12, 1)
     asyncio.run(scenario())
 
 
@@ -259,7 +301,7 @@ def test_provider_path_failure_preserves_other_results_and_backs_off(monkeypatch
         original_fetch, original_publish = cache._fetch_provider, cache._publish
         attempts = []
 
-        def fetch(ids, end):
+        def fetch(ids, end, starts=None):
             attempts.append(ids)
             if ids == ('FRED.GDP',):
                 if failure == 'worker':
@@ -268,7 +310,7 @@ def test_provider_path_failure_preserves_other_results_and_backs_off(monkeypatch
                     raise ProviderFailure('provider failed')
                 if failure == 'cancelled':
                     raise asyncio.CancelledError()
-            return original_fetch(ids, end)
+            return original_fetch(ids, end, starts)
 
         def publish(request):
             if failure == 'publish' and request.ids == ('FRED.GDP',):
@@ -300,4 +342,24 @@ def test_publish_does_not_mark_failed_result_ready():
         with pytest.raises(RuntimeError, match='missing result'):
             cache._publish(request)
         assert request.ready is None
+    asyncio.run(scenario())
+
+
+def test_wire_history_preserves_vintages_for_strict_replay_cutoffs():
+    async def scenario():
+        import json
+        feed = Feed()
+        source = pd.DataFrame({
+            'value': [1, 2], 'available_at': ['2024-02-01', '2024-03-01'],
+        }, index=pd.to_datetime(['2024-01-01', '2024-01-01']))
+        feed.get_alt_data = lambda ids, **kwargs: {s: source for s in ids}
+        cache = AlternativeData(['FRED.GDP'], feed=feed, history_start='2020-01-01')
+        await cache.refresh(cache.ids)
+        records = json.loads(json.dumps(cache.records(cache.ids)))['FRED.GDP']
+        assert len(records) == 2
+        assert select_history(records) == {'2024-01-01T00:00:00': 2}
+        assert select_history(records, datetime(2024, 3, 1, tzinfo=timezone.utc)) == {'2024-01-01T00:00:00': 1}
+        assert select_history(records, datetime(2024, 2, 1, tzinfo=timezone.utc)) == {}
+        with pytest.raises(ValueError, match='timezone'):
+            select_history(records, datetime(2024, 3, 1))
     asyncio.run(scenario())
