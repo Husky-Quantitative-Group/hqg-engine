@@ -41,8 +41,9 @@ market calendar, including holidays and early closes, and waits one minute after
 the final session close for bar publication. Repeated or older bar timestamps
 do not advance a strategy. If any universe symbol is missing, the worker waits
 for the complete period instead of mixing dates. New or resumed strategy
-contexts start with the latest eligible completed bar; they do not replay missed
-periods or restore indicator history.
+contexts start with the latest eligible completed bar. A strategy that declares
+`lookback = N` first has the previous N completed bars replayed through
+`on_data` (signals discarded), so its first live decision uses that history.
 
 `CLOSE_TO_NEXT_OPEN` waits for the following session's open before evaluating the
 completed bar. `CLOSE_TO_CLOSE` evaluates after the completed bar is available;
