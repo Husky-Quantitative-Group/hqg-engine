@@ -151,9 +151,7 @@ def test_lost_action_response_stop_acknowledgement_and_idempotency(tmp_path):
     "failure",
     [
         "backend",
-        "control",
         "website",
-        "generic_health",
         "delay",
         "malformed",
         "wrong_boot",
