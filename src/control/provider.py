@@ -36,6 +36,7 @@ class Provider:
         ttl=15,
         dashboard=None,
         dashboard_proxy=None,
+        boot_id=None,
     ):
         self.account_id, self.engine_id = str(UUID(account_id)), str(UUID(engine_id))
         if (
@@ -52,7 +53,10 @@ class Provider:
         self.dashboard = dashboard if dashboard is not None else dashboard_client(
             dashboard_url, timeout, {"Authorization": "Bearer " + secret}, dashboard_proxy
         )
-        self.boot_id, self.worker_session = str(uuid4()), None
+        # A planned restart may keep the boot ID the dashboard already accepted.
+        # While it is reused, the dashboard cannot tell two providers apart.
+        self.boot_id = str(UUID(boot_id)) if boot_id else str(uuid4())
+        self.worker_session = None
         self.deadline, self.healthy = 0, False
         self.contexts_verified, self.sync_error = False, None
         self.version, self.revision, self.configuration = 0, 0, None

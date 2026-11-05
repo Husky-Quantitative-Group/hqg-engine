@@ -65,6 +65,7 @@ services:
       DASHBOARD_SYNC_SECRET: ${DASHBOARD_SYNC_SECRET:?Set the account service credential}
       DASHBOARD_SYNC_URL: ${DASHBOARD_SYNC_URL:?Set the dashboard control URL}
       DASHBOARD_PROXY_URL: ${DASHBOARD_PROXY_URL:-}
+      PROVIDER_BOOT_ID: ${PROVIDER_BOOT_ID:-}
       DATABASE_URL: ${DATABASE_URL}
       NO_PROXY: ${NO_PROXY}
       no_proxy: ${no_proxy}

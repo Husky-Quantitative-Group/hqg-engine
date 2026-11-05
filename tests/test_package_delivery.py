@@ -218,6 +218,7 @@ def test_environment_supplies_the_optional_dashboard_proxy(monkeypatch, value, p
         "DASHBOARD_SYNC_SECRET": "test-secret",
         "DASHBOARD_SYNC_URL": "https://api.test/stage",
         "DASHBOARD_PROXY_URL": value,
+        "PROVIDER_BOOT_ID": None,
     }.items():
         if setting is None:
             monkeypatch.delenv(name, raising=False)
@@ -225,4 +226,14 @@ def test_environment_supplies_the_optional_dashboard_proxy(monkeypatch, value, p
             monkeypatch.setenv(name, setting)
     monkeypatch.setattr(server, "brokers_from_environment", dict)
     monkeypatch.setattr(server, "Provider", lambda *args, **kwargs: kwargs)
-    assert server.from_environment() == {"dashboard_proxy": proxy}
+    assert server.from_environment() == {"dashboard_proxy": proxy, "boot_id": None}
+
+
+def test_provider_reuses_only_a_valid_configured_boot_id():
+    boot_id = str(uuid4())
+    args = (str(uuid4()), str(uuid4()), "test-secret", "https://api.test/stage",
+            {"paper": Broker()}, Runtime())
+    assert Provider(*args, dashboard=object(), boot_id=boot_id.upper()).boot_id == boot_id
+    assert Provider(*args, dashboard=object()).boot_id != boot_id
+    with pytest.raises(ValueError):
+        Provider(*args, dashboard=object(), boot_id="not-a-uuid")

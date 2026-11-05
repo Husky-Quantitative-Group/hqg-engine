@@ -62,6 +62,9 @@ credentials go only to the provider; the worker uses `PROVIDER_WORKER_SECRET`.
 Registration/configuration do not start trading: wait for acknowledgements and
 explicitly Resume after readiness and broker reconciliation. New provider boots
 require the administrative replacement procedure in the dashboard setup guide.
+To keep the accepted boot across a planned restart instead, set `PROVIDER_BOOT_ID`
+to it. While it is set, the dashboard cannot tell two providers apart: never run
+a second copy with the same value.
 
 Use the [offline test guide](docs/offline-testing.md) for synthetic credentials,
 Moto, disposable PostgreSQL and Docker isolation checks. No existing volumes are

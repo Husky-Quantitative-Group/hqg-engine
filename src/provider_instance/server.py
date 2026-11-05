@@ -49,6 +49,7 @@ def from_environment():
         brokers,
         Runtime(async_session, account_id),
         dashboard_proxy=os.environ.get("DASHBOARD_PROXY_URL", "").strip() or None,
+        boot_id=os.environ.get("PROVIDER_BOOT_ID", "").strip() or None,
     )
 
 
