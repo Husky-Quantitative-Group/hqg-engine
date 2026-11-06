@@ -612,6 +612,17 @@ class Provider:
                 )
                 continue
 
+            # A finished order cannot change, so do not ask the broker about it again.
+            if details["status"] in TERMINAL and client_id not in by_client:
+                outcomes.append(
+                    {
+                        "client_order_id": client_id,
+                        "status": details["status"],
+                        "filled_qty": details.get("broker_order", {}).get("filled_qty", "0"),
+                    }
+                )
+                continue
+
             try:
                 order = by_client.get(client_id)
                 if order is None:

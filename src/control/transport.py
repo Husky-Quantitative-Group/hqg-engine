@@ -14,7 +14,7 @@ from requests.adapters import HTTPAdapter
 from requests.exceptions import RequestException
 from urllib3.connection import HTTPSConnection
 from urllib3.connectionpool import HTTPSConnectionPool
-from alpaca.data.requests import StockLatestQuoteRequest, StockBarsRequest
+from alpaca.data.requests import StockLatestQuoteRequest, StockLatestTradeRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.requests import GetCalendarRequest
 
@@ -200,7 +200,18 @@ class Broker:
             self.data.get_stock_latest_quote,
             StockLatestQuoteRequest(symbol_or_symbols=symbols, feed=self.feed),
         )
-        prices = {symbol: float(quotes[symbol].ask_price) for symbol in symbols}
+        prices = {
+            symbol: float(quotes[symbol].ask_price) if symbol in quotes else 0.0
+            for symbol in symbols
+        }
+        # Outside market hours the feed often has no ask, so we use the latest trade instead.
+        missing = [s for s, price in prices.items() if not math.isfinite(price) or price <= 0]
+        if missing:
+            trades = await self.call(
+                self.data.get_stock_latest_trade,
+                StockLatestTradeRequest(symbol_or_symbols=missing, feed=self.feed),
+            )
+            prices.update({s: float(trades[s].price) for s in missing if s in trades})
         if any(not math.isfinite(price) or price <= 0 for price in prices.values()):
             raise ValueError("Alpaca returned an invalid or unavailable quote")
         return prices
