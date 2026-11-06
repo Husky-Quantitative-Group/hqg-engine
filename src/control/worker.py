@@ -18,7 +18,8 @@ class Worker:
         self.brokers = brokers or {mode: BrokerReader(mode, self.client) for mode in MODES}
         self.strategies, self.revision = {}, None
         self.configuration_lock = asyncio.Lock()
-        self.last_weights = {}
+        # target_bars: the bar on which each strategy returned its current last_weights.
+        self.last_weights, self.target_bars = {}, {}
         self.last_bars, self.pending_rebalances = {}, {}
 
     async def load_configuration(self, state):
@@ -37,7 +38,7 @@ class Worker:
                         raise ValueError("Worker package identity mismatch")
                     strategies[mode].append((instance, item["allocation"]))
             self.strategies, self.revision = strategies, state["configuration_revision"]
-            self.last_weights = {}
+            self.last_weights, self.target_bars = {}, {}
             self.last_bars, self.pending_rebalances = {}, {}
 
     async def close_strategies(self):
@@ -75,6 +76,9 @@ class Worker:
                     await asyncio.to_thread(instance.close)
             self.last_weights = {
                 key: value for key, value in self.last_weights.items() if key[0] != mode
+            }
+            self.target_bars = {
+                key: value for key, value in self.target_bars.items() if key[0] != mode
             }
             self.last_bars = {
                 key: value for key, value in self.last_bars.items() if key[0] != mode
@@ -159,12 +163,22 @@ class Worker:
                     all_hold = False
                     targets = validate_weights(targets, instance.universe)
                     self.last_weights[(mode, index)] = targets
+                    self.target_bars[(mode, index)] = timestamp
                 for symbol, weight in targets.items():
                     weights[symbol] = weights.get(symbol, 0) + weight * allocation
             # No strategy target exists yet for an initial Hold. Retain the
             # entire mode until every allocation has supplied its first target.
             if all_hold or initial_hold:
                 return None
+            strategy_targets = [
+                {
+                    **instance.identity,
+                    "allocation": allocation,
+                    "bar_timestamp": self.target_bars[(mode, index)].isoformat(),
+                    "target_weights": self.last_weights[(mode, index)],
+                }
+                for index, (instance, allocation) in enumerate(strategies)
+            ]
         except Exception as exc:
             # Bind failures to the same session/version as the calculation. A stale
             # failure must not close a newly resumed context.
@@ -172,7 +186,7 @@ class Worker:
                 "internal/failure", json={"context": context, "message": str(exc)[:500]}
             )
             raise
-        return await self.send_rebalance(context, weights)
+        return await self.send_rebalance(context, weights, strategy_targets)
 
     async def replay(self, broker, instance, timestamp, portfolio):
         """Rebuild a fresh strategy's state from the bars before its first live bar."""
@@ -187,16 +201,19 @@ class Worker:
         for entry in history:  # Oldest first; replayed signals are discarded.
             await asyncio.to_thread(instance.on_data, entry["bars"], portfolio)
 
-    async def send_rebalance(self, context, weights=None):
+    async def send_rebalance(self, context, weights=None, strategy_targets=None):
         mode = context["mode"]
         pending = self.pending_rebalances.get(mode)
         if weights is not None or pending["context"] != context:
             # Retain a calculated signal across temporary rejection without
             # evaluating its bar again. Retries reuse the same operation ID.
+            if weights is None:
+                weights, strategy_targets = pending["target_weights"], pending["strategy_targets"]
             pending = self.pending_rebalances[mode] = {
                 "context": context,
                 "operation_id": str(uuid4()),
-                "target_weights": weights if weights is not None else pending["target_weights"],
+                "target_weights": weights,
+                "strategy_targets": strategy_targets,
             }
         response = await self.client.post(
             "internal/rebalance", json=pending,

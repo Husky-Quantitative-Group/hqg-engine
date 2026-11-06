@@ -1,5 +1,5 @@
 from sqlalchemy.orm import declarative_base, relationship
-from sqlalchemy import Column, BigInteger, Identity, String, DateTime, Boolean, Date, Numeric,PrimaryKeyConstraint, ForeignKey, CheckConstraint, UniqueConstraint, JSON
+from sqlalchemy import Column, BigInteger, Identity, String, DateTime, Boolean, Date, Numeric,PrimaryKeyConstraint, ForeignKey, CheckConstraint, UniqueConstraint, JSON, Integer, Float
 from enum import Enum
 from sqlalchemy.dialects.postgresql import ENUM as PgEnum
 
@@ -88,6 +88,23 @@ class AllocationEvent(Base):
     portfolio_id = Column(BigInteger, nullable=False)
     timestamp = Column(DateTime, nullable=False)
     allocations = Column(JSON, nullable=False) # [{"symbol": "TSLA", "weight": 0.6}, ...]
+
+class StrategyTargetEvent(Base):
+    """One strategy's own targets in a completed rebalance: the per-strategy
+    breakdown of the allocation event with the same portfolio and timestamp."""
+    __tablename__ = "strategy_target_events"
+
+    event_id = Column(BigInteger, Identity(always=True), primary_key=True)
+    portfolio_id = Column(BigInteger, nullable=False)
+    timestamp = Column(DateTime, nullable=False)
+    operation_id = Column(String(36), nullable=False)
+    strategy_id = Column(String(80), nullable=False)
+    version = Column(Integer, nullable=False)
+    source_digest = Column(String(71), nullable=False)
+    allocation = Column(Float, nullable=False)
+    # Completed bar on which the strategy returned these targets. Held targets keep their bar.
+    bar_timestamp = Column(DateTime(timezone=True), nullable=False)
+    target_weights = Column(JSON, nullable=False) # {"AAPL": 0.4}, before allocation; {} is all cash
 
 class ControlRuntime(Base):
     __tablename__ = "control_runtime"

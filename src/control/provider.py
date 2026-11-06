@@ -488,12 +488,12 @@ class Provider:
                     else "Order outcome uncertain; reconciliation required",
                 )
 
-    async def rebalance(self, context, operation_id, weights):
+    async def rebalance(self, context, operation_id, weights, strategy_targets=()):
         mode = self.admit(context)
         async with self.rebalance_locks[mode]:
-            return await self._rebalance(context, operation_id, weights)
+            return await self._rebalance(context, operation_id, weights, strategy_targets)
 
-    async def _rebalance(self, context, operation_id, weights):
+    async def _rebalance(self, context, operation_id, weights, strategy_targets=()):
         mode = self.admit(context)
         operation_id = str(UUID(operation_id))
 
@@ -554,7 +554,9 @@ class Provider:
         record["status"] = "completed"
 
         await self.runtime.save_order(mode, operation_key, record)
-        await self.runtime.cycle(mode, weights, float(account["equity"]))
+        await self.runtime.cycle(
+            mode, weights, float(account["equity"]), operation_id, strategy_targets
+        )
 
         self.modes[mode]["last_successful_cycle"] = time.time()
 
@@ -611,6 +613,17 @@ class Provider:
                         "client_order_id": client_id,
                         "status": "rejected",
                         "filled_qty": "0",
+                    }
+                )
+                continue
+
+            # A finished order cannot change, so do not ask the broker about it again.
+            if details["status"] in TERMINAL and client_id not in by_client:
+                outcomes.append(
+                    {
+                        "client_order_id": client_id,
+                        "status": details["status"],
+                        "filled_qty": details.get("broker_order", {}).get("filled_qty", "0"),
                     }
                 )
                 continue

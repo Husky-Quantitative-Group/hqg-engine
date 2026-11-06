@@ -6,7 +6,7 @@ from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from src.control.provider import Provider
 from src.control.runtime import Runtime
@@ -23,11 +23,23 @@ class Context(BaseModel):
     configuration_digest: str
 
 
+class StrategyTarget(BaseModel):
+    # Reject anything the database would refuse after orders were already sent.
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+    strategy_id: str = Field(max_length=80)
+    version: int
+    source_digest: str = Field(max_length=71)
+    allocation: float
+    bar_timestamp: AwareDatetime = Field(strict=False)  # ISO 8601 text in JSON
+    target_weights: dict[str, float]
+
+
 class Rebalance(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     context: Context
     operation_id: str
     target_weights: dict[str, float]
+    strategy_targets: list[StrategyTarget] = []
 
 
 class StrategyFailure(BaseModel):
@@ -138,7 +150,8 @@ def create_app(provider=None, worker_secret=None, background=True):
     async def rebalance(body: Rebalance):
         try:
             return await app.state.provider.rebalance(
-                body.context.model_dump(), body.operation_id, body.target_weights
+                body.context.model_dump(), body.operation_id, body.target_weights,
+                [target.model_dump() for target in body.strategy_targets],
             )
         except HTTPException:
             raise
