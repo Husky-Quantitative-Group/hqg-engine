@@ -34,8 +34,9 @@ class Broker:
         return {symbol: 100 for symbol in symbols}
 
 
-def strategy(size=BarSize.DAILY, signals=None, universe=None):
+def strategy(size=BarSize.DAILY, signals=None, universe=None, name="test"):
     return SimpleNamespace(
+        identity={"strategy_id": name, "version": 1, "source_digest": "sha256:" + name},
         universe=universe or ["AAPL"], cadence=Cadence(bar_size=size),
         on_data=Mock(side_effect=signals) if signals is not None else Mock(return_value={"AAPL": 0.4}),
     )
@@ -100,8 +101,8 @@ def test_worker_advances_each_cadence_once_per_new_completed_bar(size, first, se
 
 def test_mixed_cadences_reuse_other_strategies_targets_and_keep_modes_independent():
     async def scenario():
-        daily = strategy(signals=[{"AAPL": 0.4}, {"AAPL": 0.2}, None])
-        weekly = strategy(BarSize.WEEKLY)
+        daily = strategy(signals=[{"AAPL": 0.4}, {"AAPL": 0.2}, None], name="daily")
+        weekly = strategy(BarSize.WEEKLY, name="weekly")
         live = strategy()
         async with worker_context({"paper": [(daily, 0.5), (weekly, 0.5)], "live": [(live, 1)]}) as (
             worker, broker, _, requests, _,
@@ -113,6 +114,13 @@ def test_mixed_cadences_reuse_other_strategies_targets_and_keep_modes_independen
             broker.data["1d"] = {"AAPL": bar("2026-10-02T00:00:00-04:00")}
             await worker.cycle("paper")
             assert requests[-1]["target_weights"]["AAPL"] == pytest.approx(0.3)
+            # Unscaled per-strategy targets; the held weekly target keeps its own bar.
+            assert requests[-1]["strategy_targets"] == [
+                {**daily.identity, "allocation": 0.5, "bar_timestamp": "2026-10-02T00:00:00-04:00",
+                 "target_weights": {"AAPL": 0.2}},
+                {**weekly.identity, "allocation": 0.5, "bar_timestamp": "2026-09-21T00:00:00-04:00",
+                 "target_weights": {"AAPL": 0.4}},
+            ]
             assert weekly.on_data.call_count == live.on_data.call_count == 1
             broker.data["1d"] = {"AAPL": bar("2026-10-05T00:00:00-04:00")}
             await worker.cycle("paper")  # Hold advances the bar without trading.
@@ -164,6 +172,7 @@ def test_pause_discards_pending_targets_and_resets_strategy_bar_state():
             await worker.cycle("paper")
             assert len(requests) == 1
             assert not worker.last_weights and not worker.last_bars and not worker.pending_rebalances
+            assert not worker.target_bars
     asyncio.run(scenario())
 
 
