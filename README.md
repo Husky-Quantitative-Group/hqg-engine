@@ -64,3 +64,73 @@ Use the [offline test guide](docs/offline-testing.md) for synthetic credentials,
 Moto, disposable PostgreSQL and Docker isolation checks. No existing volumes are
 deleted or migrated. `docker compose down -v` deletes PostgreSQL history. Manually
 export wanted legacy strategy source and re-upload it through the real dashboard.
+
+## Alternative data
+
+Dashboard-delivered strategies can declare alternative series alongside their
+stock universe:
+
+```python
+class Macro(Strategy):
+    universe = ["SPY"]
+    alt_data = ["FRED.GDP"]
+
+    def on_data(self, data, portfolio):
+        gdp = data.alt_value("FRED.GDP")
+        history = data.alt_series("FRED.GDP")
+        # Return TargetWeights, Hold, or Liquidate as usual.
+```
+
+The algorithms release must support `alt_data` metadata and `Slice.alt_history`.
+Set `FRED_API_KEY` in `.env`. Compose forwards it only to `provider-api`.
+Alternative history starts inclusively `ceil(N × 1.10)` weekdays before the current
+New York date, where N is the strategy's `lookback` (default **1** when absent).
+Today and weekends are excluded. The 10% buffer approximates holidays without a
+broker calendar request; it does not guarantee N trading sessions. The default
+N=1 therefore subtracts 2 weekdays. This rolling window is recalculated on each
+request. Shared series use the earliest start date
+required by configured strategies in that mode (the longest lookback). Lookback
+defines the minimum history requested; returned history is passed through without
+trimming for individual strategies, so series may start on different dates.
+N counts weekdays before the buffer even when securities bars are weekly or monthly.
+Choose a sufficient lookback for sparse series and replay: observations before the
+window are not carried forward or fetched automatically.
+`KALSHI.<EXACT_MARKET_TICKER>` uses public daily candles without
+credentials; contract discovery/rolling are not provided by this integration.
+
+The network-enabled provider owns `hqg-datafeed`, its cache, and external
+credentials. The worker requests data through the authenticated
+`/internal/alternative-data` endpoint, which checks the current control context
+before and after fetching and allows only series declared by configured strategies
+in that mode. Neither the internal-only worker nor network-free strategy
+containers make external datafeed requests. Sandboxes receive serialized history
+and construct immutable alternative mappings in `Slice`.
+
+History is loaded on the first active decision and refreshed when a new or deferred
+strategy bar needs processing, not on every five-second worker poll. Shared series
+are deduplicated within a decision batch. The full calculated observation range
+through the current UTC date is refetched so older revisions can be discovered.
+Providers fetch concurrently with a 120-second deadline (`FETCH_TIMEOUT_SECONDS`
+in `src/alt_data.py`) and a minimum 60-second failure backoff. Timed-out threads
+remain tracked until they exit; no overlapping replacement is launched and late
+results are discarded. Successful series remain usable when another series fails.
+
+Live calls receive the newest available revision per observation date, ordered
+oldest first. Lookback replay instead selects revisions with `available_at`
+strictly before each historical bar's timezone-aware **start** timestamp. This is
+a conservative replay cutoff, not an exchange-close/publication-time estimate.
+It avoids exposing today's later revisions to historical calls, but cannot
+reconstruct vintages the datafeed does not supply. Provider availability timestamps
+may themselves be estimates. Replayed signals remain discarded as on main.
+
+When alternative data is unavailable, only affected strategies are deferred and
+their previous targets are retained. An invalid alternative-data lookback also
+defers only that strategy and is logged; it does not prevent fetching shared series
+for strategies with valid lookbacks. Fixing it requires a configuration update.
+For fetch failures, completed bars remain queued in memory,
+oldest first, at most one per strategy per worker cycle. Configuration changes and
+mode stops discard those queues; they do not survive restart. Once inputs are
+available, execution errors retain main's behavior of reporting a strategy failure
+and closing the provider gate. No general exception-to-Hold policy is introduced.
+Main's initial-target rule also remains: a mode does not rebalance until every
+strategy has supplied its first target, and repeated Hold decisions do not trade.

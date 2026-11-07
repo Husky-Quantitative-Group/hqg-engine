@@ -1,12 +1,18 @@
 import asyncio
+from collections import deque
+import logging
 import os
 import signal
 from datetime import datetime
 from uuid import uuid4
+import httpx
 
+from src.alt_data import FETCH_TIMEOUT_SECONDS, select_history
 from src.control.contract import MODES
 from src.control.transport import local_client, BrokerReader
 from src.control.sandbox import Sandbox, validate_weights
+
+logger = logging.getLogger(__name__)
 
 
 class Worker:
@@ -21,6 +27,7 @@ class Worker:
         # target_bars: the bar on which each strategy returned its current last_weights.
         self.last_weights, self.target_bars = {}, {}
         self.last_bars, self.pending_rebalances = {}, {}
+        self.pending_bars = {}
 
     async def load_configuration(self, state):
         async with self.configuration_lock:
@@ -40,6 +47,7 @@ class Worker:
             self.strategies, self.revision = strategies, state["configuration_revision"]
             self.last_weights, self.target_bars = {}, {}
             self.last_bars, self.pending_rebalances = {}, {}
+            self.pending_bars = {}
 
     async def close_strategies(self):
         for strategies in self.strategies.values():
@@ -84,6 +92,7 @@ class Worker:
                 key: value for key, value in self.last_bars.items() if key[0] != mode
             }
             self.pending_rebalances.pop(mode, None)
+            self.pending_bars = {k: v for k, v in self.pending_bars.items() if k[0] != mode}
             return None
 
         context = {
@@ -105,6 +114,19 @@ class Worker:
             broker = self.brokers[mode]
             fresh = {}
             for index, (instance, _) in enumerate(strategies):
+                required_series = getattr(instance, 'alt_data', [])
+                if required_series:
+                    count = getattr(instance, 'lookback', None)
+                    if count is not None and (type(count) is not int or not 1 <= count <= 1000):
+                        logger.warning("Deferring %s strategy %s: lookback must be an integer "
+                                       "from 1 to 1000 (got %r)", mode, index, count)
+                        continue
+                pending = (
+                    self.pending_bars.setdefault((mode, index), deque())
+                    if required_series else None
+                )
+                if pending:
+                    fresh[index] = pending[0]
                 data = await broker.bars(
                     instance.universe, instance.cadence.bar_size.value,
                     instance.cadence.execution.value,
@@ -122,10 +144,28 @@ class Worker:
                 timestamp = timestamps.pop()
                 previous = self.last_bars.get((mode, index))
                 if previous is None or timestamp > previous:
-                    fresh[index] = (timestamp, {
+                    entry = (timestamp, {
                         symbol: {key: value for key, value in data[symbol].items() if key != "timestamp"}
                         for symbol in instance.universe
                     })
+                    if pending is None:
+                        fresh[index] = entry
+                    else:
+                        if not pending or timestamp > pending[-1][0]:
+                            pending.append(entry)
+                        fresh[index] = pending[0]
+            if not fresh:
+                return None
+            required = sorted({
+                series for index in fresh
+                for series in getattr(strategies[index][0], 'alt_data', [])
+            })
+            records = await self.alternative_history(context, required) if required else {}
+            for index in list(fresh):
+                required_series = getattr(strategies[index][0], 'alt_data', [])
+                if not set(required_series) <= set(records):
+                    logger.warning("Deferring %s strategy %s: alternative history unavailable", mode, index)
+                    del fresh[index]
             if not fresh:
                 return None
             positions = {
@@ -153,8 +193,14 @@ class Worker:
                 if index in fresh:
                     timestamp, data = fresh[index]
                     if getattr(instance, "lookback", None) is not None and (mode, index) not in self.last_bars:
-                        await self.replay(broker, instance, timestamp, portfolio)
-                    targets = await asyncio.to_thread(instance.on_data, data, portfolio)
+                        await self.replay(broker, instance, timestamp, portfolio, records)
+                    required_series = getattr(instance, 'alt_data', [])
+                    if required_series:
+                        history = {s: select_history(records[s]) for s in required_series}
+                        targets = await asyncio.to_thread(instance.on_data, data, portfolio, history)
+                        self.pending_bars[(mode, index)].popleft()
+                    else:
+                        targets = await asyncio.to_thread(instance.on_data, data, portfolio)
                     self.last_bars[(mode, index)] = timestamp
                 if targets is None:
                     initial_hold |= (mode, index) not in self.last_weights
@@ -188,7 +234,20 @@ class Worker:
             raise
         return await self.send_rebalance(context, weights, strategy_targets)
 
-    async def replay(self, broker, instance, timestamp, portfolio):
+    async def alternative_history(self, context, series):
+        try:
+            response = await self.client.post(
+                'internal/alternative-data', json={'context': context, 'series': series},
+                timeout=FETCH_TIMEOUT_SECONDS + 10,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return {s: payload['history'][s] for s in series if s in payload['ready']}
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            logger.exception("Alternative history unavailable; retaining strategy targets")
+            return {}
+
+    async def replay(self, broker, instance, timestamp, portfolio, records=None):
         """Rebuild a fresh strategy's state from the bars before its first live bar."""
         count = instance.lookback
         if type(count) is not int or not 1 <= count <= 1000:
@@ -199,7 +258,15 @@ class Worker:
         if len(history) < count:
             raise ValueError(f"lookback needs {count} bars; Alpaca returned {len(history)}")
         for entry in history:  # Oldest first; replayed signals are discarded.
-            await asyncio.to_thread(instance.on_data, entry["bars"], portfolio)
+            required_series = getattr(instance, 'alt_data', [])
+            if required_series:
+                # Broker timestamps mark bar starts. Use that conservative clock:
+                # no later releases/revisions may initialize a historical bar.
+                before = datetime.fromisoformat(entry['timestamp'])
+                alternative = {s: select_history(records[s], before) for s in required_series}
+                await asyncio.to_thread(instance.on_data, entry['bars'], portfolio, alternative)
+            else:
+                await asyncio.to_thread(instance.on_data, entry["bars"], portfolio)
 
     async def send_rebalance(self, context, weights=None, strategy_targets=None):
         mode = context["mode"]

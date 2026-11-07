@@ -9,6 +9,7 @@ import time
 from uuid import uuid4
 
 from hqg_algorithms import get_strategy_metadata
+from src.alt_data import normalize_series
 
 from src.control.packages import declared_lookback, validate_package
 
@@ -33,7 +34,9 @@ class Sandbox:
     def __init__(self, package, image=None, timeout=5):
         self.identity, metadata = validate_package(package)
         self.universe = metadata["universe"]
-        self.cadence = get_strategy_metadata(package["files"][package["entrypoint"]]).cadence
+        strategy_metadata = get_strategy_metadata(package["files"][package["entrypoint"]])
+        self.cadence = strategy_metadata.cadence
+        self.alt_data = normalize_series(getattr(strategy_metadata, 'alt_data', []))
         self.lookback = declared_lookback(
             package["files"][package["entrypoint"]], metadata["class_name"]
         )
@@ -120,12 +123,15 @@ class Sandbox:
             raise ValueError("Strategy failed: " + str(result["error"])[:500])
         return result
 
-    def on_data(self, bars, portfolio):
+    def on_data(self, bars, portfolio, alt_history=None):
         with self.lock:
             try:
                 if self.container is None:
                     self.start()
-                result = self.exchange({"bars": bars, "portfolio": portfolio})
+                result = self.exchange({
+                    "bars": bars, "portfolio": portfolio,
+                    "alt_history": alt_history or {},
+                })
                 weights = result["weights"]
                 return (
                     None
