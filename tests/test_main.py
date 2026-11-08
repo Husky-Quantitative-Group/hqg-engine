@@ -1,4 +1,5 @@
 import logging
+import sys
 
 import pytest
 
@@ -67,18 +68,24 @@ def test_build_portfolio_view_handles_non_positive_equity(equity):
     assert view.weights == {}
 
 
-def test_setup_logging_configures_file_handler(monkeypatch):
+def test_setup_logging_splits_stdout_and_stderr_by_level(monkeypatch):
     calls = []
-    handler = object()
-    monkeypatch.setattr(logging, "FileHandler", lambda *args, **kwargs: handler)
     monkeypatch.setattr(logging, "basicConfig", lambda **kwargs: calls.append(kwargs))
 
     setup_logging()
 
-    assert calls == [
-        {
-            "level": logging.INFO,
-            "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-            "handlers": [handler],
-        }
-    ]
+    (config,) = calls
+    assert config["level"] == logging.INFO
+    assert config["format"] == "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    out, err = config["handlers"]
+    assert out.stream is sys.stdout
+    assert err.stream is sys.stderr
+    assert err.level == logging.WARNING
+
+    def record(level):
+        return logging.LogRecord("test", level, __file__, 0, "message", None, None)
+
+    assert out.filter(record(logging.INFO))
+    assert out.filter(record(logging.DEBUG))
+    assert not out.filter(record(logging.WARNING))
+    assert not out.filter(record(logging.ERROR))
