@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import signal
 from datetime import datetime
@@ -7,6 +8,8 @@ from uuid import uuid4
 from src.control.contract import MODES
 from src.control.transport import local_client, BrokerReader
 from src.control.sandbox import Sandbox, validate_weights
+
+logger = logging.getLogger(__name__)
 
 
 class Worker:
@@ -34,9 +37,14 @@ class Worker:
                     if instance.identity != {
                         k: item[k] for k in ("strategy_id", "version", "source_digest")
                     }:
+                        logger.critical(f"Package identity mismatch for strategy {item['strategy_id']}")
                         raise ValueError("Worker package identity mismatch")
                     strategies[mode].append((instance, item["allocation"]))
             self.strategies, self.revision = strategies, state["configuration_revision"]
+            logger.info(
+                f"Loaded configuration revision {self.revision}: "
+                f"{ {mode: len(items) for mode, items in strategies.items()} } strategies per mode"
+            )
             self.last_weights = {}
             self.last_bars, self.pending_rebalances = {}, {}
 
@@ -53,10 +61,13 @@ class Worker:
                     "internal/sessions/" + self.session_id
                 )
                 response.raise_for_status()
+                logger.info(f"Registered worker session {self.session_id}")
                 return
-            except Exception:
+            except Exception as e:
                 if attempt == 29:
+                    logger.critical(f"Worker registration failed after 30 attempts: {e}")
                     raise
+                logger.warning(f"Worker registration attempt {attempt + 1} failed: {e}")
                 await asyncio.sleep(1)
 
     async def cycle(self, mode):
@@ -65,6 +76,7 @@ class Worker:
         state = response.json()
 
         if state["worker_session"] != self.session_id:
+            logger.critical(f"Worker session {self.session_id} replaced by {state['worker_session']}")
             raise RuntimeError("Worker session replaced; stop the old worker")
 
         if not state["modes"][mode]["gate_open"]:
@@ -164,6 +176,7 @@ class Worker:
             if all_hold or initial_hold:
                 return None
         except Exception as exc:
+            logger.error(f"Strategy calculation failed for {mode}: {exc}", exc_info=True)
             # Bind failures to the same session/version as the calculation. A stale
             # failure must not close a newly resumed context.
             await self.client.post(
@@ -188,6 +201,7 @@ class Worker:
         )
         response.raise_for_status()
         self.pending_rebalances.pop(mode, None)
+        logger.info(f"Rebalance {pending['operation_id']} accepted for {mode}: {pending['target_weights']}")
         return response.json()
 
     async def mode_loop(self, mode):
@@ -196,16 +210,20 @@ class Worker:
                 await self.cycle(mode)
             except RuntimeError:
                 raise
-            except Exception:
+            except Exception as e:
                 # The provider owns the safety gate; retry status without synthesizing permission.
-                pass
+                logger.warning(f"Cycle for {mode} failed, retrying: {e}")
             await asyncio.sleep(5)
 
     async def run(self):
         try:
             await self.register()
             await asyncio.gather(*(self.mode_loop(mode) for mode in MODES))
+        except Exception as e:
+            logger.critical(f"Worker stopped unexpectedly: {e!r}", exc_info=True)
+            raise
         finally:
+            logger.info("Worker shutting down")
             try:
                 await self.close_strategies()
             finally:

@@ -1,6 +1,7 @@
 """Persistent, credential-free Docker contexts for dashboard strategy code."""
 
 import json
+import logging
 import math
 import os
 import struct
@@ -11,6 +12,8 @@ from uuid import uuid4
 from hqg_algorithms import get_strategy_metadata
 
 from src.control.packages import validate_package
+
+logger = logging.getLogger(__name__)
 
 
 def validate_weights(weights, universe):
@@ -83,6 +86,7 @@ class Sandbox:
         self.socket = self.stream._sock
         self.container.start()
         self.exchange({"package": self.package})
+        logger.info(f"Started sandbox {self.container.name} for strategy {self.identity['strategy_id']}")
 
     def read(self, size, deadline):
         chunks = bytearray()
