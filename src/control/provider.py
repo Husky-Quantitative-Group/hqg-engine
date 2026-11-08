@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import hashlib
+import logging
 import math
 import time
 from uuid import uuid4, UUID
@@ -20,6 +21,13 @@ from src.control.transport import dashboard_client, OrderNotSubmitted
 from src.control.packages import validate_package
 
 TERMINAL = {"filled", "canceled", "expired", "rejected"}
+CRITICAL_REASONS = {
+    "broker_outcome_uncertain",
+    "broker_submission_failed",
+    "runtime_database_unavailable",
+}
+
+logger = logging.getLogger(__name__)
 
 
 class Provider:
@@ -100,7 +108,8 @@ class Provider:
         try:
             async with asyncio.timeout(self.timeout):
                 await self.runtime.save(self.state())
-        except Exception:
+        except Exception as e:
+            logger.error(f"Failed to persist provider state: {e!r}")
             self.close(MODES, "runtime_database_unavailable")
             self.healthy = False
             raise
@@ -109,6 +118,9 @@ class Provider:
         # Synchronous transition: no network/DB await before gates close.
         for mode in modes:
             state = self.modes[mode]
+            if state["gate_open"]:
+                level = logging.CRITICAL if reason in CRITICAL_REASONS else logging.WARNING
+                logger.log(level, f"Closing {mode} execution gate: {reason}")
             if state["gate_open"] or force or state["stop_reason"] != reason:
                 state.update(incident_id=str(uuid4()), incident_version=self.version)
 
@@ -126,8 +138,10 @@ class Provider:
             asyncio.create_task(self.watchdog()),
             asyncio.create_task(self.cleanup_loop()),
         ]
+        logger.info(f"Provider started for account {self.account_id} (boot {self.boot_id})")
 
     async def shutdown(self):
+        logger.info("Provider shutting down")
         self.close(MODES, "provider_shutdown")
         for task in self.tasks:
             task.cancel()
@@ -152,6 +166,7 @@ class Provider:
             await asyncio.sleep(min(0.1, self.interval / 4))
 
             if self.healthy and time.monotonic() >= self.deadline:
+                logger.warning("Dashboard permission expired before the next successful sync")
                 self.healthy = False
                 self.close(MODES, "permission_expired")
                 # Persistence is best effort; failure cannot delay the in-memory stop.
@@ -171,9 +186,13 @@ class Provider:
                         if account_id in account_ids or (
                             broker.account_id and account_id != broker.account_id
                         ):
+                            logger.critical(
+                                f"Broker account {account_id} for {mode} does not match its expected binding"
+                            )
                             raise ValueError("Broker account/mode binding mismatch")
                         account_ids.add(account_id)
                     self.contexts_verified = True
+                    logger.info(f"Verified broker account bindings for {sorted(self.brokers)}")
     
                 request_id, sent = str(uuid4()), time.monotonic()
                 body = self.state()
@@ -255,9 +274,11 @@ class Provider:
                             response.raise_for_status()
                             package = response.json()
                         if validate_package(package)[0] != identity:
+                            logger.critical(f"Downloaded strategy package {source_digest} does not match its approved identity")
                             raise ValueError("Strategy package digest mismatch")
                         self.package_cache[source_digest] = package
                     elif validate_package(package)[0] != identity:
+                        logger.critical(f"Cached strategy package {source_digest} does not match its approved identity")
                         raise ValueError("Strategy package digest mismatch")
                     packages[source_digest] = package
                 if time.monotonic() >= sent + min(ttl, self.timeout):
@@ -279,10 +300,13 @@ class Provider:
                 ):
                     raise ValueError("Missing configuration")
 
+                if self.sync_error:
+                    logger.info("Dashboard sync recovered")
                 self.sync_error = None
                 changed = data["configuration_revision"] != self.revision
 
                 if not changed and config != self.configuration:
+                    logger.critical(f"Configuration changed without a new revision ({self.revision})")
                     raise ValueError("Immutable revision changed")
                 if changed and any(
                     s["gate_open"] or not s["reconciled"] for s in self.modes.values()
@@ -292,6 +316,10 @@ class Provider:
                 self.version = data["control_version"]
                 self.packages, self.approved = packages, approved
                 if changed:
+                    logger.info(
+                        f"Configuration changed from revision {self.revision} "
+                        f"to {data['configuration_revision']}"
+                    )
                     self.close(MODES, "configuration_changed", force=True)
                     self.configuration, self.revision = (
                         config,
@@ -337,10 +365,14 @@ class Provider:
                             stop_reason=None,
                             strategy_error=None,
                         )
+                        logger.info(f"Opened {mode} execution gate for incident {incident}")
             except Exception as exc:
+                previous = self.sync_error
                 self.sync_error = (
                     str(exc) if isinstance(exc, ValueError) else type(exc).__name__
                 )
+                if self.sync_error != previous:
+                    logger.error(f"Dashboard sync failed: {exc!r}")
                 was_healthy = self.healthy
                 self.healthy = False
                 # Do not replace a closed incident on every failed retry.
@@ -356,6 +388,7 @@ class Provider:
     async def register_worker(self, session_id):
         session_id = str(UUID(session_id))
         if session_id != self.worker_session:
+            logger.info(f"Registering worker session {session_id} (previous: {self.worker_session})")
             self.close(MODES, "worker_restart", force=True)
             self.worker_session = session_id
             await self.persist()
@@ -407,6 +440,7 @@ class Provider:
             existing = await self.runtime.order(client_id)
             if existing:
                 if existing["request"] != payload:
+                    logger.warning(f"Order {client_id} reused with a different request")
                     raise HTTPException(409, "Operation identity reused")
                 # A duplicate never retries submission, even if the outcome is uncertain.
                 return existing
@@ -442,6 +476,7 @@ class Provider:
                 }
 
                 await self.runtime.save_order(mode, client_id, details)
+                logger.info(f"Order {client_id} submitted: {side} {quantity} {symbol} ({order['status']})")
                 self.modes[mode]["order_outcomes"] = [
                     {
                         "client_order_id": client_id,
@@ -457,6 +492,11 @@ class Provider:
                 raise
             except Exception as exc:
                 not_submitted = isinstance(exc, OrderNotSubmitted)
+                logger.log(
+                    logging.ERROR if not_submitted else logging.CRITICAL,
+                    f"Order {client_id} ({side} {quantity} {symbol}) "
+                    f"{'was not submitted' if not_submitted else 'has an uncertain outcome'}: {exc!r}"
+                )
                 if not_submitted:
                     await self.runtime.save_order(
                         mode, client_id,
@@ -497,6 +537,7 @@ class Provider:
             any(not math.isfinite(w) or not 0 <= w <= 1 for w in weights.values())
             or sum(weights.values()) > 1
         ):
+            logger.warning(f"Rejected invalid target weights for {mode}: {weights}")
             raise HTTPException(400, "Invalid target weights")
 
         # Idempotent whole-operation result prevents recalculation from newly filled positions.
@@ -519,6 +560,7 @@ class Provider:
         )
 
         if open_orders:
+            logger.warning(f"Rebalance for {mode} blocked by {len(open_orders)} open order(s)")
             raise HTTPException(
                 409, "Pending orders must reconcile before another rebalance"
             )
@@ -543,9 +585,20 @@ class Provider:
 
         record = {"weights": weights, "status": "in_progress", "orders": orders}
         await self.runtime.save_order(mode, operation_key, record)
+        logger.info(f"Rebalancing {mode} to {weights} with {len(orders)} order(s)")
 
-        for symbol, qty, side in sorted(orders, key=lambda o: o[2] == "buy"):
-            await self.submit(context, operation_id, symbol, qty, side)
+        submitted = 0
+        try:
+            for symbol, qty, side in sorted(orders, key=lambda o: o[2] == "buy"):
+                await self.submit(context, operation_id, symbol, qty, side)
+                submitted += 1
+        except Exception as e:
+            if submitted:
+                logger.critical(
+                    f"Rebalance {operation_key} for {mode} left partially applied: "
+                    f"{submitted}/{len(orders)} order(s) submitted: {e!r}"
+                )
+            raise
 
         record["status"] = "completed"
 
@@ -555,6 +608,7 @@ class Provider:
         self.modes[mode]["last_successful_cycle"] = time.time()
 
         await self.persist()
+        logger.info(f"Rebalance completed for {mode}")
         return record
 
     async def cleanup_loop(self):
@@ -563,7 +617,8 @@ class Provider:
                 if not self.modes[mode]["gate_open"]:
                     try:
                         await self.reconcile(mode)
-                    except Exception:
+                    except Exception as e:
+                        logger.warning(f"Reconciliation failed for {mode}: {e!r}")
                         self.modes[mode]["reconciled"] = False
                         try:
                             await self.persist()
@@ -643,13 +698,16 @@ class Provider:
                     outstanding.append(
                         {"client_order_id": client_id, "status": order["status"]}
                     )
-            except Exception:
+            except Exception as e:
+                level = logging.CRITICAL if details["status"] == "uncertain" else logging.WARNING
+                logger.log(level, f"Could not reconcile order {client_id} ({details['status']}) in {mode}: {e!r}")
                 outstanding.append(
                     {"client_order_id": client_id, "status": "uncertain"}
                 )
         # Include engine-owned orders recovered from broker even if the database lost an ID.
         for client_id, order in by_client.items():
             if client_id.startswith("hqg-") and client_id not in records:
+                logger.warning(f"Recovered untracked open order {client_id} in {mode}")
                 await self.runtime.save_order(
                     mode,
                     client_id,

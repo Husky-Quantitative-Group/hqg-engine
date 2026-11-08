@@ -1,3 +1,4 @@
+import logging
 import os
 import secrets
 from contextlib import asynccontextmanager
@@ -10,6 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.control.provider import Provider
 from src.control.runtime import Runtime
 from src.control.transport import brokers_from_environment
+from src.main import setup_logging
+
+logger = logging.getLogger(__name__)
 
 
 class Context(BaseModel):
@@ -55,6 +59,7 @@ def from_environment():
 def create_app(provider=None, worker_secret=None, background=True):
     @asynccontextmanager
     async def lifespan(app):
+        setup_logging()
         app.state.provider = provider or from_environment()
         app.state.worker_secret = worker_secret or os.environ["PROVIDER_WORKER_SECRET"]
         if background:
@@ -72,6 +77,7 @@ def create_app(provider=None, worker_secret=None, background=True):
             if not secrets.compare_digest(
                 request.headers.get("authorization", ""), expected
             ):
+                logger.warning(f"Rejected unauthenticated request to {request.url.path}")
                 return JSONResponse(
                     {"detail": "Worker authentication required"}, status_code=403
                 )
@@ -122,6 +128,10 @@ def create_app(provider=None, worker_secret=None, background=True):
         except HTTPException:
             raise
         except Exception:
+            logger.critical(
+                f"Rebalance {body.operation_id} for {body.context.mode} failed unexpectedly",
+                exc_info=True,
+            )
             app.state.provider.close(("paper", "live"), "runtime_database_unavailable")
             raise HTTPException(503, "Execution unavailable")
 
@@ -129,6 +139,7 @@ def create_app(provider=None, worker_secret=None, background=True):
     async def strategy_failure(body: StrategyFailure):
         context = body.context.model_dump()
         app.state.provider.admit(context)
+        logger.error(f"Strategy failure reported for {context['mode']}: {body.message}")
         app.state.provider.close(
             (context["mode"],), "strategy_execution_failed", force=True
         )
