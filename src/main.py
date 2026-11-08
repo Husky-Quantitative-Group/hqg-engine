@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 from math import trunc
 
 from hqg_algorithms import PortfolioView
@@ -55,10 +56,19 @@ def build_portfolio_view(equity, positions, market_data):
     )
 
 def setup_logging():
+    # Stdout stream for info / debug
+    out = logging.StreamHandler(sys.stdout)
+    out.setLevel(logging.DEBUG)
+    out.addFilter(lambda r: r.levelno < logging.WARNING)
+
+    # Stderr stream for errors
+    err = logging.StreamHandler(sys.stderr)
+    err.setLevel(logging.WARNING)
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[logging.FileHandler("app.log", mode="a")]
+        handlers=[out, err]
     )
 
 
