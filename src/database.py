@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 engine = create_async_engine(
     os.getenv("DATABASE_URL"),
-    echo=True, # dev
+    echo=False, # dev
     # disable pooling if going w/ serverless (?)
 )
 
@@ -46,11 +46,11 @@ async def init_db():
             "UPDATE portfolios SET is_active = false",
         ):
             await conn.execute(text(statement))
-    print("Initialized database")
+    logger.info("Initialized database")
 
 async def close_db():
     await engine.dispose()
-    print("Closed database connection")
+    logger.info("Closed database connection")
 
 async def wait_for_postgres():
     db_url = os.getenv("DATABASE_URL")
@@ -72,6 +72,7 @@ async def wait_for_postgres():
         except Exception as e:
             retry += 1
             if retry >= max_retries:
+                logger.error(f"Failed to connect to PostgreSQL after {max_retries} retries: {e}")
                 await check_engine.dispose()
                 raise ConnectionError(f"Failed to connect to PostgreSQL after {max_retries} retries: {e}")
             await asyncio.sleep(1)
@@ -79,12 +80,15 @@ async def wait_for_postgres():
     await check_engine.dispose()
 
 async def main():
-    print("Waiting for PostgreSQL to be ready")
+    from src.main import setup_logging
+    setup_logging()
+
+    logger.info("Waiting for PostgreSQL to be ready")
     await wait_for_postgres()
-    
-    print("Initializing database")
+
+    logger.info("Initializing database")
     await init_db()
-    print("Database initialized successfully")
+    logger.info("Database initialized successfully")
 
 if __name__ == "__main__":
     asyncio.run(main())
