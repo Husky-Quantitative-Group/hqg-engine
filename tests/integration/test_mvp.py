@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import os
+import time
 from uuid import uuid4
 
 import httpx
@@ -178,6 +179,7 @@ def test_health_failure_closes_both_modes_and_requires_incident_resume(
 ):
     async def scenario():
         async with Harness(tmp_path) as h:
+            h.provider.max_ttl = h.dashboard_app.state.control.ttl = 15
             await h.configure()
             old_resume = await h.resume("paper")
             await h.resume("live")
@@ -214,10 +216,14 @@ def test_health_failure_closes_both_modes_and_requires_incident_resume(
                     transport=httpx.MockTransport(bad_response)
                 )
             assert not await h.provider.sync_once()
-            assert all(not s["gate_open"] for s in h.provider.modes.values())
+            if failure in ("backend", "website", "delay"):
+                # A temporary failure keeps the current permission until it runs out.
+                assert all(s["gate_open"] for s in h.provider.modes.values())
+                h.provider.deadline = time.monotonic()
             with pytest.raises(HTTPException) as blocked:
                 await h.submit("paper")
             assert blocked.value.status_code == 409
+            assert all(not s["gate_open"] for s in h.provider.modes.values())
             h.dashboard_app.state.faults.update(backend=False, delay=0)
             h.readiness_app.state.faults.update(
                 control=False, website=False, generic_health=False

@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import hashlib
+import logging
 import math
 import time
 from uuid import uuid4, UUID
@@ -20,6 +21,12 @@ from src.control.transport import dashboard_client, OrderNotSubmitted
 from src.control.packages import validate_package
 
 TERMINAL = {"filled", "canceled", "expired", "rejected"}
+
+logger = logging.getLogger(__name__)
+
+
+class DashboardUnavailable(Exception):
+    """A failed sync that the next one can fix, such as a timeout or a 5xx."""
 
 
 class Provider:
@@ -189,29 +196,39 @@ class Provider:
                     approved_strategies=self.approved,
                 )
 
-                async with asyncio.timeout(self.timeout):
-                    response = await self.dashboard.post(
-                        f"internal/v1/accounts/{self.account_id}/sync", json=body
-                    )
-                    response.raise_for_status()
-                    data = response.json()
+                try:
+                    async with asyncio.timeout(self.timeout):
+                        response = await self.dashboard.post(
+                            f"internal/v1/accounts/{self.account_id}/sync", json=body
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                except (TimeoutError, httpx.TransportError) as exc:
+                    raise DashboardUnavailable(type(exc).__name__) from exc
+                except httpx.HTTPStatusError as exc:
+                    status = exc.response.status_code
+                    if status < 500 and status != 429:
+                        raise
+                    raise DashboardUnavailable(f"HTTP {status}") from exc
                 ttl = data["permission_ttl_seconds"]
 
                 if (
                     data["account_id"] != self.account_id
                     or data["boot_id"] != self.boot_id
                     or data["request_id"] != request_id
-                    or data["dashboard_ready"] is not True
                     or type(ttl) not in (float, int)
                     or not 0 < ttl <= self.max_ttl
-                    or time.monotonic() >= sent + min(ttl, self.timeout)
                     or type(data["control_version"]) is not int
                     or data["control_version"] < self.version
                     or type(data["configuration_revision"]) is not int
                     or data["configuration_revision"] < self.revision
                     or set(data["modes"]) != set(MODES)
                 ):
-                    raise ValueError("Unhealthy, stale or mismatched sync")
+                    raise ValueError("Stale or mismatched sync")
+                if data["dashboard_ready"] is not True:
+                    raise DashboardUnavailable("Dashboard not ready")
+                if time.monotonic() >= sent + min(ttl, self.timeout):
+                    raise DashboardUnavailable("Sync response arrived too late")
 
                 for desired in data["modes"].values():
                     if (
@@ -343,13 +360,30 @@ class Provider:
                         )
             except Exception as exc:
                 self.sync_error = (
-                    str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+                    str(exc)
+                    if isinstance(exc, (ValueError, DashboardUnavailable))
+                    else type(exc).__name__
                 )
+                remaining = self.deadline - time.monotonic()
+                if isinstance(exc, DashboardUnavailable) and self.healthy and remaining > 0:
+                    # Keep the current permission. If no sync succeeds before it
+                    # expires, the watchdog pauses both modes.
+                    logger.warning(
+                        "Dashboard sync failed (%s); permission still valid for %.1f s",
+                        self.sync_error,
+                        remaining,
+                    )
+                    return False
                 was_healthy = self.healthy
                 self.healthy = False
                 # Do not replace a closed incident on every failed retry.
                 if was_healthy or any(s["gate_open"] for s in self.modes.values()):
                     self.close(MODES, "dashboard_sync_failed", force=True)
+                    logger.warning(
+                        "Dashboard sync failed (%s); paused both modes", self.sync_error
+                    )
+                else:
+                    logger.warning("Dashboard sync failed (%s)", self.sync_error)
                 try:
                     await self.persist()
                 except Exception:
