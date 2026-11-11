@@ -65,6 +65,7 @@ services:
       FRED_API_KEY: ${FRED_API_KEY:-}
       DASHBOARD_SYNC_SECRET: ${DASHBOARD_SYNC_SECRET:?Set the account service credential}
       DASHBOARD_SYNC_URL: ${DASHBOARD_SYNC_URL:?Set the dashboard control URL}
+      DASHBOARD_PROXY_URL: ${DASHBOARD_PROXY_URL:-}
       DATABASE_URL: ${DATABASE_URL}
       NO_PROXY: ${NO_PROXY}
       no_proxy: ${no_proxy}
@@ -77,6 +78,7 @@ services:
       ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
       ALPACA_PAPER: ${ALPACA_PAPER:-true}
       ALPACA_DATA_FEED: ${ALPACA_DATA_FEED:-iex}
+      ALPACA_PROXY_URL: ${ALPACA_PROXY_URL:-}
       IBKR_HOST: ${IBKR_HOST}
       IBKR_PORT: ${IBKR_PORT}
       IBKR_CLIENT_ID: ${IBKR_CLIENT_ID}
