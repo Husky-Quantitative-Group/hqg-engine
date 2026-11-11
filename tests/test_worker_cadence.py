@@ -3,6 +3,7 @@ import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -206,4 +207,187 @@ class Replacement(Strategy):
             assert requests[-1]["target_weights"] == {"AAPL": 0.2}
             assert requests[-1]["context"]["configuration_digest"] == "replacement"
             assert not worker.pending_rebalances
+    asyncio.run(scenario())
+
+
+def alternative_records(value=1):
+    return [{'date': '2024-01-01T00:00:00', 'available_at': '2024-02-01T00:00:00+00:00', 'value': value}]
+
+
+def test_alternative_data_is_fetched_once_for_shared_series_only_on_new_bars():
+    async def scenario():
+        first, second = strategy(), strategy()
+        first.alt_data = second.alt_data = ['FRED.GDP']
+        async with worker_context({'paper': [(first, 0.5), (second, 0.5)]}) as (worker, broker, _, requests, _):
+            worker.alternative_history = AsyncMock(return_value={'FRED.GDP': alternative_records(3)})
+            broker.data['1d'] = {'AAPL': bar('2026-10-01T00:00:00-04:00')}
+            await worker.cycle('paper')
+            await worker.cycle('paper')
+            assert worker.alternative_history.await_count == 1
+            assert worker.alternative_history.call_args.args[1] == ['FRED.GDP']
+            assert len(requests) == 1
+            assert first.on_data.call_args.args[2] == {'FRED.GDP': {'2024-01-01T00:00:00': 3}}
+    asyncio.run(scenario())
+
+
+def test_strategies_with_different_lookbacks_share_untrimmed_series():
+    async def scenario():
+        first, second = strategy(), strategy()
+        first.alt_data, first.lookback = ['FRED.GDP', 'FRED.CPI'], 2
+        second.alt_data, second.lookback = ['FRED.GDP'], 3
+        async with worker_context({'paper': [(first, 0.5), (second, 0.5)]}) as (worker, broker, _, _, _):
+            records = {
+                'FRED.GDP': alternative_records(3),
+                'FRED.CPI': [{**alternative_records(2)[0], 'date': '2024-01-10T00:00:00'}],
+            }
+            worker.alternative_history = AsyncMock(return_value=records)
+            worker.replay = AsyncMock()
+            broker.data['1d'] = {'AAPL': bar('2026-10-01T00:00:00-04:00')}
+            await worker.cycle('paper')
+            worker.alternative_history.assert_awaited_once()
+            assert worker.alternative_history.call_args.args[1] == ['FRED.CPI', 'FRED.GDP']
+            assert first.on_data.call_args.args[2] == {
+                'FRED.GDP': {'2024-01-01T00:00:00': 3},
+                'FRED.CPI': {'2024-01-10T00:00:00': 2},
+            }
+            assert second.on_data.call_args.args[2] == {'FRED.GDP': {'2024-01-01T00:00:00': 3}}
+            assert worker.replay.call_args_list[0].args[4]['FRED.GDP'][0]['value'] == 3
+            assert worker.replay.call_args_list[1].args[4]['FRED.GDP'][0]['value'] == 3
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('count', ['20', 0, -1, 1001, True, 2.5])
+@pytest.mark.parametrize('has_previous_target', [False, True])
+def test_invalid_alt_lookback_defers_only_affected_strategy(caplog, count, has_previous_target):
+    async def scenario():
+        invalid, valid = strategy(), strategy()
+        invalid.alt_data, invalid.lookback = ['FRED.GDP', 'FRED.CPI'], count
+        valid.alt_data = ['FRED.GDP']
+        async with worker_context({'paper': [(invalid, 0.5), (valid, 0.5)]}) as (worker, broker, state, requests, _):
+            worker.alternative_history = AsyncMock(return_value={'FRED.GDP': alternative_records()})
+            if has_previous_target:
+                worker.last_weights[('paper', 0)] = {'AAPL': 0.2}
+            broker.data['1d'] = {'AAPL': bar('2026-10-01T00:00:00-04:00')}
+            await worker.cycle('paper')
+            assert not invalid.on_data.called
+            assert valid.on_data.call_count == 1
+            assert worker.alternative_history.call_args.args[1] == ['FRED.GDP']
+            assert ('paper', 0) not in worker.pending_bars
+            assert ('paper', 0) not in worker.last_bars
+            assert state['modes']['paper']['gate_open']
+            assert 'Deferring paper strategy 0: lookback' in caplog.text
+            if has_previous_target:
+                assert worker.last_weights[('paper', 0)] == {'AAPL': 0.2}
+                assert requests[0]['target_weights']['AAPL'] == pytest.approx(0.3)
+            else:
+                assert ('paper', 0) not in worker.last_weights
+                assert not requests  # Preserve main's initial-target rebalance gate.
+    asyncio.run(scenario())
+
+
+def test_alt_failure_keeps_oldest_bar_and_previous_targets_without_closing_gate():
+    async def scenario():
+        instance = strategy()
+        instance.alt_data = ['FRED.GDP']
+        async with worker_context({'paper': [(instance, 1)]}) as (worker, broker, state, requests, _):
+            worker.alternative_history = AsyncMock(return_value={'FRED.GDP': alternative_records()})
+            broker.data['1d'] = {'AAPL': bar('2026-10-01T00:00:00-04:00', 100)}
+            await worker.cycle('paper')
+            worker.alternative_history.return_value = {}
+            broker.data['1d'] = {'AAPL': bar('2026-10-02T00:00:00-04:00', 101)}
+            await worker.cycle('paper')
+            broker.data['1d'] = {'AAPL': bar('2026-10-05T00:00:00-04:00', 102)}
+            await worker.cycle('paper')
+            assert worker.last_weights[('paper', 0)] == {'AAPL': 0.4}
+            assert len(requests) == 1 and instance.on_data.call_count == 1
+            assert state['modes']['paper']['gate_open']
+            worker.alternative_history.return_value = {'FRED.GDP': alternative_records()}
+            await worker.cycle('paper')
+            await worker.cycle('paper')
+            assert [call.args[0]['AAPL']['close'] for call in instance.on_data.call_args_list] == [100, 101, 102]
+            assert not worker.pending_bars[('paper', 0)]
+    asyncio.run(scenario())
+
+
+def test_initial_alt_failure_preserves_upstream_initial_target_gate():
+    async def scenario():
+        missing, ready = strategy(), strategy()
+        missing.alt_data = ['FRED.GDP']
+        async with worker_context({'paper': [(missing, 0.5), (ready, 0.5)]}) as (worker, broker, state, requests, _):
+            worker.alternative_history = AsyncMock(return_value={})
+            broker.data['1d'] = {'AAPL': bar('2026-10-01T00:00:00-04:00')}
+            await worker.cycle('paper')
+            assert not missing.on_data.called and ready.on_data.call_count == 1
+            assert not requests and state['modes']['paper']['gate_open']
+            worker.alternative_history.return_value = {'FRED.GDP': alternative_records()}
+            await worker.cycle('paper')
+            assert len(requests) == 1 and missing.on_data.call_count == 1
+    asyncio.run(scenario())
+
+
+def test_pausing_discards_pending_alt_bars_and_fetches_nothing():
+    async def scenario():
+        instance = strategy()
+        instance.alt_data = ['FRED.GDP']
+        async with worker_context({'paper': [(instance, 1)]}) as (worker, broker, state, _, _):
+            worker.alternative_history = AsyncMock(return_value={})
+            broker.data['1d'] = {'AAPL': bar('2026-10-01T00:00:00-04:00')}
+            await worker.cycle('paper')
+            assert worker.pending_bars[('paper', 0)]
+            state['modes']['paper']['gate_open'] = False
+            await worker.cycle('paper')
+            assert not worker.pending_bars
+            assert worker.alternative_history.await_count == 1
+    asyncio.run(scenario())
+
+
+def test_alt_lookback_filters_future_revisions_but_live_uses_latest():
+    async def scenario():
+        instance = strategy(signals=[{'AAPL': 0.1}, {'AAPL': 0.2}, {'AAPL': 0.4}])
+        instance.alt_data, instance.lookback = ['FRED.GDP'], 2
+        async with worker_context({'paper': [(instance, 1)]}) as (worker, broker, _, requests, _):
+            records = [
+                {'date': '2023-01-01T00:00:00', 'available_at': release, 'value': value}
+                for release, value in [('2023-12-31T00:00:00+00:00', 1),
+                                       ('2024-02-01T00:00:00+00:00', 2),
+                                       ('2025-01-01T00:00:00+00:00', 99)]
+            ]
+            worker.alternative_history = AsyncMock(return_value={'FRED.GDP': records})
+            broker.history = AsyncMock(return_value=[
+                {'timestamp': '2024-01-15T00:00:00+00:00', 'bars': {'AAPL': {'close': 100}}},
+                {'timestamp': '2024-02-15T00:00:00+00:00', 'bars': {'AAPL': {'close': 101}}},
+            ])
+            broker.data['1d'] = {'AAPL': bar('2026-10-01T00:00:00-04:00')}
+            await worker.cycle('paper')
+            assert [call.args[2]['FRED.GDP']['2023-01-01T00:00:00']
+                    for call in instance.on_data.call_args_list] == [1, 2, 99]
+            assert requests[0]['target_weights'] == {'AAPL': 0.4}
+            await worker.cycle('paper')
+            broker.history.assert_awaited_once()
+    asyncio.run(scenario())
+
+
+def test_alternative_http_failures_are_deferred_not_reported_as_strategy_errors():
+    async def scenario():
+        instance = strategy()
+        instance.alt_data = ['FRED.GDP']
+        async with worker_context({'paper': [(instance, 1)]}) as (worker, broker, _, _, _):
+            paths = []
+
+            def respond(request):
+                paths.append(request.url.path)
+                if request.url.path.endswith('/state'):
+                    return httpx.Response(200, json=state)
+                return httpx.Response(503)
+
+            state = {'worker_session': worker.session_id, 'configuration_revision': 1,
+                     'account_id': 'account', 'boot_id': 'boot', 'control_version': 1,
+                     'configuration_digest': 'digest', 'modes': {'paper': {'gate_open': True}}}
+            await worker.client.aclose()
+            worker.client = httpx.AsyncClient(base_url='http://127.0.0.1:8013/', transport=httpx.MockTransport(respond))
+            broker.data['1d'] = {'AAPL': bar('2026-10-01T00:00:00-04:00')}
+            assert await worker.cycle('paper') is None
+            assert '/internal/alternative-data' in paths
+            assert '/internal/failure' not in paths
+            assert not instance.on_data.called
     asyncio.run(scenario())
