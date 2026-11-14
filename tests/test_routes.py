@@ -253,3 +253,103 @@ def test_get_allocation_events_supports_current_and_legacy_shapes(stored, expect
 
     assert response.events[0].timestamp == "2026-01-03T09:00:00"
     assert response.events[0].allocations.allocations == expected
+
+
+def curve(points):
+    return [(point.timestamp, point.equity_value) for point in points]
+
+
+def test_replay_rebalances_at_closes_and_drifts_between_signals():
+    closes = [
+        (date(2026, 11, 9), {"SPY": 100.0}),
+        (date(2026, 11, 10), {"SPY": 110.0}),
+        (date(2026, 11, 11), {"SPY": 120.0}),
+        (date(2026, 11, 12), {"SPY": 60.0}),
+    ]
+    # Sunday's targets take effect at Monday's close.
+    signals = {date(2026, 11, 8): {"SPY": 0.5}, date(2026, 11, 11): {"SPY": 1.0}}
+
+    assert curve(routes.replay(signals, closes)) == [
+        ("2026-11-09", 100_000.0),
+        ("2026-11-10", 105_000.0),
+        ("2026-11-11", 110_000.0),
+        ("2026-11-12", 55_000.0),
+    ]
+
+
+def target(timestamp, strategy_id, allocation, weights):
+    return SimpleNamespace(
+        timestamp=timestamp, strategy_id=strategy_id, allocation=allocation,
+        target_weights=weights,
+    )
+
+
+def test_get_replay_combines_strategies_by_allocation(monkeypatch):
+    portfolio = SimpleNamespace(portfolio_id=1, mode="paper")
+    monday, late_tuesday, wednesday = (
+        datetime(2026, 11, 9, 21, 1),  # 4:01 PM in New York
+        datetime(2026, 11, 11, 2),  # 9 PM on Tuesday in New York
+        datetime(2026, 11, 11, 21, 1),
+    )
+    rows = [
+        target(monday, "a", 1.0, {"SPY": 1.0}),
+        target(late_tuesday, "a", 0.5, {"SPY": 1.0}),
+        target(late_tuesday, "b", 0.5, {"TLT": 1.0}),
+        target(wednesday, "b", 1.0, {"TLT": 1.0}),  # "a" left the portfolio.
+    ]
+    closes = [
+        (date(2026, 11, 9), {"SPY": 100.0, "TLT": 50.0}),
+        (date(2026, 11, 10), {"SPY": 110.0, "TLT": 50.0}),
+        (date(2026, 11, 11), {"SPY": 121.0, "TLT": 55.0}),
+        (date(2026, 11, 12), {"SPY": 100.0, "TLT": 60.0}),
+    ]
+    requested = []
+    monkeypatch.setattr(
+        routes, "daily_closes", lambda *args: requested.append(args) or closes
+    )
+    session = make_session(Result(scalar=portfolio), Result(values=rows))
+
+    response = run(routes.get_replay(1, session))
+
+    assert requested == [(["SPY", "TLT"], date(2026, 11, 9))]
+    assert response.mode == "paper"
+    assert curve(response.total) == [
+        ("2026-11-09", 100_000.0),
+        ("2026-11-10", 110_000.0),
+        ("2026-11-11", 121_000.0),
+        ("2026-11-12", 132_000.0),
+    ]
+    assert [(item.strategy_id, curve(item.data)) for item in response.strategies] == [
+        ("a", [
+            ("2026-11-09", 100_000.0),
+            ("2026-11-10", 110_000.0),
+            ("2026-11-11", 121_000.0),
+            ("2026-11-12", 121_000.0),
+        ]),
+        ("b", [
+            ("2026-11-10", 100_000.0),
+            ("2026-11-11", 110_000.0),
+            ("2026-11-12", 120_000.0),
+        ]),
+    ]
+
+
+def test_get_replay_is_empty_without_logged_targets(monkeypatch):
+    monkeypatch.setattr(routes, "daily_closes", Mock(side_effect=AssertionError))
+    session = make_session(Result(scalar=SimpleNamespace(portfolio_id=1)), Result())
+
+    response = run(routes.get_replay(1, session))
+
+    assert response.total == [] and response.strategies == []
+
+
+def test_get_replay_reports_unavailable_prices(monkeypatch):
+    monkeypatch.setattr(routes, "daily_closes", Mock(side_effect=ValueError("no data")))
+    rows = [target(datetime(2026, 11, 9, 21, 1), "a", 1.0, {"SPY": 1.0})]
+    session = make_session(Result(scalar=SimpleNamespace(portfolio_id=1)), Result(values=rows))
+
+    with pytest.raises(HTTPException) as exc_info:
+        run(routes.get_replay(1, session))
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.detail == "Price data unavailable: no data"

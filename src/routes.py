@@ -1,12 +1,16 @@
 from enum import Enum
 from typing import Optional, List, Dict, Literal
+import asyncio
+from collections import defaultdict
+from itertools import groupby
 import statistics
 import logging
 from fastapi import APIRouter, HTTPException, Depends
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from src.control.cadence import MARKET_ZONE
 from src.database import get_session
 
 logger = logging.getLogger(__name__)
@@ -17,6 +21,7 @@ from src.db.models import (
     PerformanceSnapshot,
     HoldingsSnapshot,
     StrategyWeightsSnapshot,
+    StrategyTargetEvent,
     ExecutionEvent as ExecutionEventDB,
     AllocationEvent as AllocationEventDB,
     Action
@@ -125,6 +130,18 @@ class AllocationEvent(BaseModel):
 class AllocationEventsResponse(PortfolioContext):
     """Expected data model for allocation events endpoint"""
     events: List[AllocationEvent]
+
+class StrategyReplay(BaseModel):
+    """Data model for one strategy's replayed equity curve"""
+    strategy_id: str
+    data: List[EquityPoint]
+
+class ReplayResponse(PortfolioContext):
+    """Expected data model for the target-weight replay endpoint (each curve starts at REPLAY_CAPITAL)"""
+    total: List[EquityPoint]
+    strategies: List[StrategyReplay]
+
+REPLAY_CAPITAL = 100_000.0
 
 @router.get("/portfolio/{id}/equity", response_model=EquityResponse)
 async def get_equity(id: int, timeframe: Optional[Timeframe] = None, session: AsyncSession = Depends(get_session)):
@@ -417,3 +434,77 @@ async def get_allocation_events(id: int, timeframe: Optional[Timeframe] = None, 
         )
 
     return AllocationEventsResponse(**portfolio_context(portfolio), events=events)
+
+def daily_closes(symbols, start):
+    """[(day, {symbol: close})] from `start` to today. The closes are yfinance's, adjusted
+    for splits and dividends, fetched through hqg-datafeed as in the backtester."""
+    from datafeed import Config, DataFeed  # Only the replay needs market data.
+
+    frame = DataFeed(Config()).get_securities(
+        symbols, datetime.combine(start, datetime.min.time()), datetime.now()
+    )
+    closes = frame.xs("close", axis=1, level="field").ffill().dropna()
+    return [(day.date(), prices.to_dict()) for day, prices in closes.iterrows()]
+
+def replay(signals, closes):
+    """Close-to-close backtest of {day: target weights}: REPLAY_CAPITAL is rebalanced to each
+    signal at the first close on or after its day, and drifts with prices in between."""
+    pending = sorted(signals.items(), reverse=True)  # Earliest last, for pop().
+    cash, shares, points = REPLAY_CAPITAL, {}, []
+    for day, prices in closes:
+        value = cash + sum(quantity * prices[symbol] for symbol, quantity in shares.items())
+        weights = None
+        while pending and pending[-1][0] <= day:
+            weights = pending.pop()[1]
+        if weights is not None:
+            shares = {symbol: value * weight / prices[symbol] for symbol, weight in weights.items()}
+            cash = value * (1 - sum(weights.values()))
+        if points or weights is not None:  # A curve starts at its first trade.
+            points.append(EquityPoint(timestamp=day.isoformat(), equity_value=round(value, 2)))
+    return points
+
+@router.get("/portfolio/{id}/replay", response_model=ReplayResponse)
+async def get_replay(id: int, session: AsyncSession = Depends(get_session)):
+    """replay the logged strategy targets from REPLAY_CAPITAL: each strategy on its own,
+    and the whole portfolio as the engine combined them by allocation"""
+    portfolio = await get_portfolio(id, session)
+
+    query = select(StrategyTargetEvent).where(StrategyTargetEvent.portfolio_id == id)
+    query = query.order_by(StrategyTargetEvent.timestamp, StrategyTargetEvent.event_id)
+    result = await session.execute(query)
+
+    # The rows of one rebalance share its timestamp. A rebalance trades on its New York
+    # date, and a later rebalance on the same date replaces it.
+    total, strategies, active = {}, defaultdict(dict), set()
+    for timestamp, group in groupby(result.scalars().all(), key=lambda row: row.timestamp):
+        group = list(group)
+        day = timestamp.replace(tzinfo=timezone.utc).astimezone(MARKET_ZONE).date()
+        combined = defaultdict(float)
+        for row in group:
+            strategies[row.strategy_id][day] = row.target_weights
+            for symbol, weight in row.target_weights.items():
+                combined[symbol] += weight * row.allocation
+        present = {row.strategy_id for row in group}
+        for strategy_id in active - present:
+            strategies[strategy_id][day] = {}  # Dropped from the portfolio, so sold.
+        total[day], active = dict(combined), present
+
+    if not total:
+        return ReplayResponse(**portfolio_context(portfolio), total=[], strategies=[])
+
+    symbols = sorted({symbol for weights in total.values() for symbol in weights})
+    closes = [(day, {}) for day in sorted(total)]  # All cash: nothing to price.
+    if symbols:
+        try:
+            closes = await asyncio.to_thread(daily_closes, symbols, min(total))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Price data unavailable: {exc}") from exc
+
+    return ReplayResponse(
+        **portfolio_context(portfolio),
+        total=replay(total, closes),
+        strategies=[
+            StrategyReplay(strategy_id=strategy_id, data=replay(signals, closes))
+            for strategy_id, signals in strategies.items()
+        ],
+    )
