@@ -1,9 +1,11 @@
 import asyncio
+import sys
 from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import httpx
+import pandas as pd
 import pytest
 from fastapi import HTTPException
 
@@ -277,10 +279,12 @@ def test_replay_rebalances_at_closes_and_drifts_between_signals():
     ]
 
 
-def target(timestamp, strategy_id, allocation, weights):
+def target(timestamp, strategy_id, allocation, weights, *, bar_timestamp=None,
+           version=1, source_digest="source-1"):
     return SimpleNamespace(
         timestamp=timestamp, strategy_id=strategy_id, allocation=allocation,
-        target_weights=weights,
+        target_weights=weights, bar_timestamp=bar_timestamp or timestamp,
+        version=version, source_digest=source_digest,
     )
 
 
@@ -353,3 +357,126 @@ def test_get_replay_reports_unavailable_prices(monkeypatch):
 
     assert exc_info.value.status_code == 502
     assert exc_info.value.detail == "Price data unavailable: no data"
+
+
+def test_get_replay_preserves_history_before_a_later_ticker_exists(monkeypatch):
+    days = pd.to_datetime(["2026-11-09", "2026-11-10", "2026-11-11"])
+    frame = pd.DataFrame(
+        {("SPY", "close"): [100.0, 110.0, 120.0],
+         ("NEW", "close"): [float("nan"), float("nan"), 50.0]},
+        index=days,
+    )
+    frame.columns.names = ["symbol", "field"]
+    feed = Mock()
+    feed.get_securities.return_value = frame
+    monkeypatch.setitem(sys.modules, "datafeed", SimpleNamespace(
+        Config=Mock(), DataFeed=Mock(return_value=feed),
+    ))
+    rows = [
+        target(datetime(2026, 11, 9, 21, 1), "a", 1.0, {"SPY": 1.0}),
+        target(datetime(2026, 11, 11, 21, 1), "b", 1.0, {"NEW": 1.0}),
+    ]
+    session = make_session(Result(scalar=SimpleNamespace(portfolio_id=1)), Result(values=rows))
+
+    response = run(routes.get_replay(1, session))
+
+    assert curve(response.total) == [
+        ("2026-11-09", 100_000.0),
+        ("2026-11-10", 110_000.0),
+        ("2026-11-11", 120_000.0),
+    ]
+    assert curve(response.strategies[1].data) == [("2026-11-11", 100_000.0)]
+
+
+@pytest.mark.parametrize("fresh_signal, expected", [
+    (None, 100_000.0), ("bar", 112_500.0), ("version", 112_500.0), ("source", 112_500.0),
+])
+def test_get_replay_distinguishes_held_targets_from_fresh_identical_targets(
+    monkeypatch, fresh_signal, expected,
+):
+    monday, tuesday = datetime(2026, 11, 9, 21, 1), datetime(2026, 11, 10, 21, 1)
+    rows = [
+        target(monday, "a", 0.5, {"SPY": 0.5}),
+        target(monday, "b", 0.5, {}),
+        target(tuesday, "a", 0.5, {"SPY": 0.5},
+               bar_timestamp=tuesday if fresh_signal == "bar" else monday,
+               version=2 if fresh_signal == "version" else 1,
+               source_digest="source-2" if fresh_signal == "source" else "source-1"),
+        target(tuesday, "b", 0.5, {"TLT": 1.0}),
+    ]
+    closes = [
+        (date(2026, 11, 9), {"SPY": 100.0, "TLT": 50.0}),
+        (date(2026, 11, 10), {"SPY": 200.0, "TLT": 50.0}),
+        (date(2026, 11, 11), {"SPY": 100.0, "TLT": 50.0}),
+    ]
+    monkeypatch.setattr(routes, "daily_closes", lambda *args: closes)
+    session = make_session(Result(scalar=SimpleNamespace(portfolio_id=1)), Result(values=rows))
+
+    response = run(routes.get_replay(1, session))
+
+    assert curve(response.strategies[0].data) == [
+        ("2026-11-09", 100_000.0),
+        ("2026-11-10", 150_000.0),
+        ("2026-11-11", expected),
+    ]
+    # Portfolio targets still rebalance when another strategy trades.
+    assert curve(response.total) == [
+        ("2026-11-09", 100_000.0),
+        ("2026-11-10", 125_000.0),
+        ("2026-11-11", 109_375.0),
+    ]
+
+
+def test_get_replay_reinvests_when_a_removed_strategy_returns_with_the_same_bar(monkeypatch):
+    monday = datetime(2026, 11, 9, 21, 1)
+    rows = [
+        target(monday, "a", 1.0, {"SPY": 0.5}),
+        target(datetime(2026, 11, 10, 21, 1), "b", 1.0, {}),
+        target(datetime(2026, 11, 11, 21, 1), "a", 1.0, {"SPY": 0.5}, bar_timestamp=monday),
+    ]
+    closes = [
+        (date(2026, 11, 9), {"SPY": 100.0}),
+        (date(2026, 11, 10), {"SPY": 200.0}),
+        (date(2026, 11, 11), {"SPY": 100.0}),
+        (date(2026, 11, 12), {"SPY": 200.0}),
+    ]
+    monkeypatch.setattr(routes, "daily_closes", lambda *args: closes)
+    session = make_session(Result(scalar=SimpleNamespace(portfolio_id=1)), Result(values=rows))
+
+    response = run(routes.get_replay(1, session))
+
+    assert curve(response.strategies[0].data) == [
+        ("2026-11-09", 100_000.0), ("2026-11-10", 150_000.0),
+        ("2026-11-11", 150_000.0), ("2026-11-12", 225_000.0),
+    ]
+
+
+@pytest.mark.parametrize("price", [None, 0.0, -1.0, float("nan"), float("inf")])
+@pytest.mark.parametrize("already_held", [False, True])
+def test_replay_rejects_unusable_prices_only_when_needed(price, already_held):
+    monday, tuesday = date(2026, 11, 9), date(2026, 11, 10)
+    signals = {monday if already_held else tuesday: {"SPY": 1.0}}
+    closes = [(monday, {"SPY": 100.0}), (tuesday, {} if price is None else {"SPY": price})]
+
+    with pytest.raises(ValueError, match="SPY.*2026-11-10"):
+        routes.replay(signals, closes)
+
+
+def test_replay_does_not_require_prices_for_zero_weight_targets():
+    monday, tuesday = date(2026, 11, 9), date(2026, 11, 10)
+
+    assert curve(routes.replay({monday: {"UNUSED": 0.0}}, [(monday, {}), (tuesday, {})])) == [
+        ("2026-11-09", 100_000.0), ("2026-11-10", 100_000.0),
+    ]
+
+
+def test_get_replay_reports_missing_required_price(monkeypatch):
+    monkeypatch.setattr(routes, "daily_closes", lambda *args: [(date(2026, 11, 9), {})])
+    rows = [target(datetime(2026, 11, 9, 21, 1), "a", 1.0, {"SPY": 1.0})]
+    session = make_session(Result(scalar=SimpleNamespace(portfolio_id=1)), Result(values=rows))
+
+    with pytest.raises(HTTPException) as exc_info:
+        run(routes.get_replay(1, session))
+
+    assert exc_info.value.status_code == 502
+    assert "SPY" in exc_info.value.detail and "2026-11-09" in exc_info.value.detail

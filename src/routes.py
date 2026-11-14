@@ -3,6 +3,7 @@ from typing import Optional, List, Dict, Literal
 import asyncio
 from collections import defaultdict
 from itertools import groupby
+import math
 import statistics
 import logging
 from fastapi import APIRouter, HTTPException, Depends
@@ -443,8 +444,9 @@ def daily_closes(symbols, start):
     frame = DataFeed(Config()).get_securities(
         symbols, datetime.combine(start, datetime.min.time()), datetime.now()
     )
-    closes = frame.xs("close", axis=1, level="field").ffill().dropna()
-    return [(day.date(), prices.to_dict()) for day, prices in closes.iterrows()]
+    # A later listing must not remove earlier dates for the other holdings.
+    closes = frame.xs("close", axis=1, level="field").ffill()
+    return [(day.date(), prices.dropna().to_dict()) for day, prices in closes.iterrows()]
 
 def replay(signals, closes):
     """Close-to-close backtest of {day: target weights}: REPLAY_CAPITAL is rebalanced to each
@@ -452,10 +454,16 @@ def replay(signals, closes):
     pending = sorted(signals.items(), reverse=True)  # Earliest last, for pop().
     cash, shares, points = REPLAY_CAPITAL, {}, []
     for day, prices in closes:
-        value = cash + sum(quantity * prices[symbol] for symbol, quantity in shares.items())
         weights = None
         while pending and pending[-1][0] <= day:
             weights = pending.pop()[1]
+        if weights is not None:
+            weights = {symbol: weight for symbol, weight in weights.items() if weight}
+        for symbol in shares.keys() | (weights or {}).keys():
+            price = prices.get(symbol)
+            if price is None or not math.isfinite(price) or price <= 0:
+                raise ValueError(f"Missing or invalid close for {symbol} on {day.isoformat()}")
+        value = cash + sum(quantity * prices[symbol] for symbol, quantity in shares.items())
         if weights is not None:
             shares = {symbol: value * weight / prices[symbol] for symbol, weight in weights.items()}
             cash = value * (1 - sum(weights.values()))
@@ -475,36 +483,43 @@ async def get_replay(id: int, session: AsyncSession = Depends(get_session)):
 
     # The rows of one rebalance share its timestamp. A rebalance trades on its New York
     # date, and a later rebalance on the same date replaces it.
-    total, strategies, active = {}, defaultdict(dict), set()
+    total, strategies, previous_signals = {}, defaultdict(dict), {}
     for timestamp, group in groupby(result.scalars().all(), key=lambda row: row.timestamp):
         group = list(group)
         day = timestamp.replace(tzinfo=timezone.utc).astimezone(MARKET_ZONE).date()
         combined = defaultdict(float)
+        current_signals = {}
         for row in group:
-            strategies[row.strategy_id][day] = row.target_weights
+            signal = (row.version, row.source_digest, row.bar_timestamp)
+            current_signals[row.strategy_id] = signal
+            # Every portfolio rebalance logs held targets too. Only a fresh
+            # strategy signal rebalances its standalone curve.
+            if previous_signals.get(row.strategy_id) != signal:
+                strategies[row.strategy_id][day] = row.target_weights
             for symbol, weight in row.target_weights.items():
                 combined[symbol] += weight * row.allocation
-        present = {row.strategy_id for row in group}
-        for strategy_id in active - present:
+        for strategy_id in previous_signals.keys() - current_signals.keys():
             strategies[strategy_id][day] = {}  # Dropped from the portfolio, so sold.
-        total[day], active = dict(combined), present
+        total[day], previous_signals = dict(combined), current_signals
 
     if not total:
         return ReplayResponse(**portfolio_context(portfolio), total=[], strategies=[])
 
-    symbols = sorted({symbol for weights in total.values() for symbol in weights})
+    symbols = sorted({
+        symbol for signals in (total, *strategies.values())
+        for weights in signals.values() for symbol, weight in weights.items() if weight
+    })
     closes = [(day, {}) for day in sorted(total)]  # All cash: nothing to price.
-    if symbols:
-        try:
+    try:
+        if symbols:
             closes = await asyncio.to_thread(daily_closes, symbols, min(total))
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Price data unavailable: {exc}") from exc
-
-    return ReplayResponse(
-        **portfolio_context(portfolio),
-        total=replay(total, closes),
-        strategies=[
-            StrategyReplay(strategy_id=strategy_id, data=replay(signals, closes))
-            for strategy_id, signals in strategies.items()
-        ],
-    )
+        return ReplayResponse(
+            **portfolio_context(portfolio),
+            total=replay(total, closes),
+            strategies=[
+                StrategyReplay(strategy_id=strategy_id, data=replay(signals, closes))
+                for strategy_id, signals in strategies.items()
+            ],
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Price data unavailable: {exc}") from exc
