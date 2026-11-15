@@ -2,15 +2,17 @@ import logging
 import os
 import secrets
 from contextlib import asynccontextmanager
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from src.control.provider import Provider
 from src.control.runtime import Runtime
 from src.control.transport import brokers_from_environment
+from src.control.alternative import AlternativeService
 from src.main import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -26,17 +28,35 @@ class Context(BaseModel):
     configuration_digest: str
 
 
+class StrategyTarget(BaseModel):
+    # Reject anything the database would refuse after orders were already sent.
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+    strategy_id: str = Field(max_length=80)
+    version: int
+    source_digest: str = Field(max_length=71)
+    allocation: float
+    bar_timestamp: AwareDatetime = Field(strict=False)  # ISO 8601 text in JSON
+    target_weights: dict[str, float]
+
+
 class Rebalance(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     context: Context
     operation_id: str
     target_weights: dict[str, float]
+    strategy_targets: list[StrategyTarget] = []
 
 
 class StrategyFailure(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     context: Context
     message: str = Field(max_length=500)
+
+
+class AlternativeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    context: Context
+    series: list[str] = Field(min_length=1, max_length=1000)
 
 
 def from_environment():
@@ -56,12 +76,13 @@ def from_environment():
     )
 
 
-def create_app(provider=None, worker_secret=None, background=True):
+def create_app(provider=None, worker_secret=None, background=True, alternative=None):
     @asynccontextmanager
     async def lifespan(app):
         setup_logging()
         app.state.provider = provider or from_environment()
         app.state.worker_secret = worker_secret or os.environ["PROVIDER_WORKER_SECRET"]
+        app.state.alternative = alternative or AlternativeService()
         if background:
             await app.state.provider.start()
 
@@ -96,6 +117,25 @@ def create_app(provider=None, worker_secret=None, background=True):
     async def register(session_id: UUID):
         return await app.state.provider.register_worker(str(session_id))
 
+    # Registered before the generic broker read so "history" never reaches it.
+    @app.get("/internal/broker/{mode}/history")
+    async def broker_history(mode: str, symbols: str, bar_size: str, before: str, count: int):
+        broker = app.state.provider.brokers.get(mode)
+        if broker is None:
+            raise HTTPException(409, "Alpaca mode is not configured")
+        tickers = symbols.split(",") if symbols else []
+        if not tickers or len(tickers) > 200:
+            raise HTTPException(400, "1-200 symbols required")
+        if bar_size not in {"1d", "1w", "1m", "1q"} or not 1 <= count <= 1000:
+            raise HTTPException(400, "Unsupported lookback history")
+        try:
+            end = datetime.fromisoformat(before)
+        except ValueError:
+            end = None
+        if end is None or end.tzinfo is None:
+            raise HTTPException(400, "A timezone-aware bar timestamp is required")
+        return await broker.history(tickers, bar_size, end, count)
+
     @app.get("/internal/broker/{mode}/{resource}")
     async def broker_read(
         mode: str, resource: str, symbols: str = "",
@@ -123,7 +163,8 @@ def create_app(provider=None, worker_secret=None, background=True):
     async def rebalance(body: Rebalance):
         try:
             return await app.state.provider.rebalance(
-                body.context.model_dump(), body.operation_id, body.target_weights
+                body.context.model_dump(), body.operation_id, body.target_weights,
+                [target.model_dump() for target in body.strategy_targets],
             )
         except HTTPException:
             raise
@@ -134,6 +175,19 @@ def create_app(provider=None, worker_secret=None, background=True):
             )
             app.state.provider.close(("paper", "live"), "runtime_database_unavailable")
             raise HTTPException(503, "Execution unavailable")
+
+    @app.post("/internal/alternative-data")
+    async def alternative_data(body: AlternativeRequest):
+        context = body.context.model_dump()
+        app.state.provider.admit(context)
+        try:
+            result = await app.state.alternative.fetch(
+                app.state.provider.state(), context['mode'], body.series,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        app.state.provider.admit(context)
+        return result
 
     @app.post("/internal/failure")
     async def strategy_failure(body: StrategyFailure):

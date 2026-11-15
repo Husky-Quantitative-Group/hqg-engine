@@ -1,6 +1,6 @@
 ib_async==2.0.1
 pyyaml==6.0.3
-hqg_algorithms==1.0.1
+hqg_algorithms==2.0.1
 sqlalchemy[asyncio]==2.0.27
 asyncpg==0.29.0
 apscheduler==3.11.1
@@ -17,3 +17,5 @@ pytest
 scikit-learn==1.9.1
 cvxpy==1.9.3
 cma==4.5.0
+hqg-datafeed==0.1.0
+pandas

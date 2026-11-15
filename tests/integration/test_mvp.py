@@ -12,7 +12,7 @@ from conftest import Harness, ACCOUNT, HTTPServer, WORKER_SECRET
 from conftest import APPROVED, PACKAGE
 from src.control.transport import local_client
 from src.control.worker import Worker
-from src.db.models import Portfolio, AllocationEvent, ExecutionEvent
+from src.db.models import Portfolio, AllocationEvent, ExecutionEvent, StrategyTargetEvent
 
 
 def run(coroutine):
@@ -76,6 +76,18 @@ def test_authorization_configuration_and_concurrent_worker_contexts(tmp_path):
                     )
                     == 2
                 )
+                events = (await session.execute(select(AllocationEvent))).scalars().all()
+                targets = (
+                    (await session.execute(select(StrategyTargetEvent))).scalars().all()
+                )
+                # One row per strategy, keyed like its rebalance's allocation event.
+                assert sorted((t.portfolio_id, t.timestamp) for t in targets) == sorted(
+                    (e.portfolio_id, e.timestamp) for e in events
+                )
+                for target in targets:
+                    assert {k: getattr(target, k) for k in APPROVED[0]} == APPROVED[0]
+                    assert target.allocation == 1 and target.bar_timestamp.tzinfo
+                    assert target.target_weights == {"AAPL": 0.4, "MSFT": 0.4}
             for mode in ("paper", "live"):
                 logs = h.broker_app.state.contexts[mode]["requests"]
                 assert any(r["path"] == "v2/stocks/quotes/latest" for r in logs)

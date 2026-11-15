@@ -95,6 +95,43 @@ def test_existing_sdk_clients_supply_real_hosts_credentials_feed_and_bars(monkey
     asyncio.run(scenario())
 
 
+def test_quotes_fall_back_to_the_latest_trade_when_there_is_no_ask(monkeypatch):
+    seen = []
+
+    def send(self, request, **kwargs):
+        url = urlsplit(request.url)
+        seen.append((url.path, parse_qs(url.query)["symbols"][0]))
+        if url.path.endswith("quotes/latest"):
+            # After hours the IEX feed often has no ask.
+            return response(request, {"quotes": {
+                symbol: {"ap": ask, "as": 1, "bp": 0, "bs": 0, "ax": "V", "bx": "V",
+                         "t": "2026-11-05T21:01:00Z"}
+                for symbol, ask in {"SPY": 500, "VNQ": 0, "VUG": 0}.items()
+            }})
+        return response(request, {"trades": {"VNQ": {
+            "p": 90.5, "s": 100, "x": "V", "i": 1, "c": ["@"], "z": "B",
+            "t": "2026-11-05T20:59:59Z",
+        }}})
+
+    monkeypatch.setattr(requests.Session, "send", send)
+
+    async def scenario():
+        broker = Broker("paper", "test-key", "test-secret")
+        try:
+            assert await broker.quotes(["SPY", "VNQ"]) == {"SPY": 500, "VNQ": 90.5}
+            with pytest.raises(ValueError, match="unavailable quote"):
+                await broker.quotes(["SPY", "VUG"])  # No trade to fall back to either.
+        finally:
+            await broker.close()
+
+    asyncio.run(scenario())
+    # Only symbols without an ask are priced from their latest trade.
+    assert seen == [
+        ("/v2/stocks/quotes/latest", "SPY,VNQ"), ("/v2/stocks/trades/latest", "VNQ"),
+        ("/v2/stocks/quotes/latest", "SPY,VUG"), ("/v2/stocks/trades/latest", "VUG"),
+    ]
+
+
 def test_completed_bars_wait_for_all_symbols_and_refresh_at_the_next_close(monkeypatch):
     now = datetime(2026, 10, 2, 20, 2, tzinfo=timezone.utc)
     timestamp, missing, reads = "2026-10-01T04:00:00Z", False, []

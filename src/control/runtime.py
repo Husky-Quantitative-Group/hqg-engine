@@ -10,6 +10,7 @@ from src.db.models import (
     ControlRuntime,
     BrokerOrder,
     AllocationEvent,
+    StrategyTargetEvent,
     PerformanceSnapshot,
     ExecutionEvent,
     Action,
@@ -118,7 +119,7 @@ class Runtime:
                 for record in result.scalars()
             }
 
-    async def cycle(self, mode, weights, equity):
+    async def cycle(self, mode, weights, equity, operation_id=None, strategy_targets=()):
         async with asyncio.timeout(
             3
         ), self.lock, self.sessions() as session, session.begin():
@@ -129,13 +130,23 @@ class Runtime:
             )
 
             portfolio = result.scalar_one()
+            timestamp = datetime.utcnow()
             session.add(
                 AllocationEvent(
                     portfolio_id=portfolio.portfolio_id,
-                    timestamp=datetime.utcnow(),
+                    timestamp=timestamp,
                     allocations=weights,
                 )
             )
+            for target in strategy_targets:
+                session.add(
+                    StrategyTargetEvent(
+                        portfolio_id=portfolio.portfolio_id,
+                        timestamp=timestamp,
+                        operation_id=operation_id,
+                        **target,
+                    )
+                )
 
             key = {
                 "portfolio_id": portfolio.portfolio_id,
