@@ -186,9 +186,6 @@ class Provider:
                         if account_id in account_ids or (
                             broker.account_id and account_id != broker.account_id
                         ):
-                            logger.critical(
-                                f"Broker account {account_id} for {mode} does not match its expected binding"
-                            )
                             raise ValueError("Broker account/mode binding mismatch")
                         account_ids.add(account_id)
                     self.contexts_verified = True
@@ -274,11 +271,9 @@ class Provider:
                             response.raise_for_status()
                             package = response.json()
                         if validate_package(package)[0] != identity:
-                            logger.critical(f"Downloaded strategy package {source_digest} does not match its approved identity")
                             raise ValueError("Strategy package digest mismatch")
                         self.package_cache[source_digest] = package
                     elif validate_package(package)[0] != identity:
-                        logger.critical(f"Cached strategy package {source_digest} does not match its approved identity")
                         raise ValueError("Strategy package digest mismatch")
                     packages[source_digest] = package
                 if time.monotonic() >= sent + min(ttl, self.timeout):
@@ -306,7 +301,6 @@ class Provider:
                 changed = data["configuration_revision"] != self.revision
 
                 if not changed and config != self.configuration:
-                    logger.critical(f"Configuration changed without a new revision ({self.revision})")
                     raise ValueError("Immutable revision changed")
                 if changed and any(
                     s["gate_open"] or not s["reconciled"] for s in self.modes.values()

@@ -11,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 engine = create_async_engine(
     os.getenv("DATABASE_URL"),
-    echo=False, # dev
     # disable pooling if going w/ serverless (?)
 )
 

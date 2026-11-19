@@ -42,7 +42,6 @@ class Worker:
                     if instance.identity != {
                         k: item[k] for k in ("strategy_id", "version", "source_digest")
                     }:
-                        logger.critical(f"Package identity mismatch for strategy {item['strategy_id']}")
                         raise ValueError("Worker package identity mismatch")
                     strategies[mode].append((instance, item["allocation"]))
             self.strategies, self.revision = strategies, state["configuration_revision"]
@@ -71,7 +70,6 @@ class Worker:
                 return
             except Exception as e:
                 if attempt == 29:
-                    logger.critical(f"Worker registration failed after 30 attempts: {e}")
                     raise
                 logger.warning(f"Worker registration attempt {attempt + 1} failed: {e}")
                 await asyncio.sleep(1)
@@ -82,7 +80,6 @@ class Worker:
         state = response.json()
 
         if state["worker_session"] != self.session_id:
-            logger.critical(f"Worker session {self.session_id} replaced by {state['worker_session']}")
             raise RuntimeError("Worker session replaced; stop the old worker")
 
         if not state["modes"][mode]["gate_open"]:
