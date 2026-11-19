@@ -1,6 +1,7 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 from unittest.mock import AsyncMock
@@ -267,6 +268,7 @@ def test_invalid_alt_lookback_defers_only_affected_strategy(caplog, count, has_p
             worker.alternative_history = AsyncMock(return_value={'FRED.GDP': alternative_records()})
             if has_previous_target:
                 worker.last_weights[('paper', 0)] = {'AAPL': 0.2}
+                worker.target_bars[('paper', 0)] = datetime.fromisoformat('2026-09-30T00:00:00-04:00')
             broker.data['1d'] = {'AAPL': bar('2026-10-01T00:00:00-04:00')}
             await worker.cycle('paper')
             assert not invalid.on_data.called
