@@ -45,6 +45,10 @@ class Worker:
                         raise ValueError("Worker package identity mismatch")
                     strategies[mode].append((instance, item["allocation"]))
             self.strategies, self.revision = strategies, state["configuration_revision"]
+            logger.info(
+                f"Loaded configuration revision {self.revision}: "
+                f"{ {mode: len(items) for mode, items in strategies.items()} } strategies per mode"
+            )
             self.last_weights, self.target_bars = {}, {}
             self.last_bars, self.pending_rebalances = {}, {}
             self.pending_bars = {}
@@ -62,10 +66,12 @@ class Worker:
                     "internal/sessions/" + self.session_id
                 )
                 response.raise_for_status()
+                logger.info(f"Registered worker session {self.session_id}")
                 return
-            except Exception:
+            except Exception as e:
                 if attempt == 29:
                     raise
+                logger.warning(f"Worker registration attempt {attempt + 1} failed: {e}")
                 await asyncio.sleep(1)
 
     async def cycle(self, mode):
@@ -226,6 +232,7 @@ class Worker:
                 for index, (instance, allocation) in enumerate(strategies)
             ]
         except Exception as exc:
+            logger.error(f"Strategy calculation failed for {mode}: {exc}", exc_info=True)
             # Bind failures to the same session/version as the calculation. A stale
             # failure must not close a newly resumed context.
             await self.client.post(
@@ -287,6 +294,7 @@ class Worker:
         )
         response.raise_for_status()
         self.pending_rebalances.pop(mode, None)
+        logger.info(f"Rebalance {pending['operation_id']} accepted for {mode}: {pending['target_weights']}")
         return response.json()
 
     async def mode_loop(self, mode):
@@ -295,16 +303,20 @@ class Worker:
                 await self.cycle(mode)
             except RuntimeError:
                 raise
-            except Exception:
+            except Exception as e:
                 # The provider owns the safety gate; retry status without synthesizing permission.
-                pass
+                logger.warning(f"Cycle for {mode} failed, retrying: {e}")
             await asyncio.sleep(5)
 
     async def run(self):
         try:
             await self.register()
             await asyncio.gather(*(self.mode_loop(mode) for mode in MODES))
+        except Exception as e:
+            logger.critical(f"Worker stopped unexpectedly: {e!r}", exc_info=True)
+            raise
         finally:
+            logger.info("Worker shutting down")
             try:
                 await self.close_strategies()
             finally:

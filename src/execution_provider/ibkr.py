@@ -1,6 +1,9 @@
 import asyncio
+import logging
 from ib_async import IB, Stock, MarketOrder
 from .base import Executor
+
+logger = logging.getLogger(__name__)
 
 class IBKRExecutor(Executor):
     def __init__(self, connection: IB):
@@ -69,7 +72,7 @@ class IBKRExecutor(Executor):
         """
 
         if target_weights is None:
-            print("No signal update this bar")
+            logger.info("No signal update this bar")
             return
         
         portfolio_value = portfolio_value * 0.95 # to maintain cash buffer
@@ -90,7 +93,7 @@ class IBKRExecutor(Executor):
                 
                 price = ticker.last if ticker.last else ticker.close
                 if price is None or price == 0:
-                    print(f"Warning: No valid price data for {symbol}")
+                    logger.warning(f"No valid price data for {symbol}")
                     continue
                     
                 prices[symbol] = price
@@ -104,7 +107,7 @@ class IBKRExecutor(Executor):
             target_value = portfolio_value * target_weight * drawdown_safety
             
             if symbol not in prices:
-                print(f"Warning: No price data for {symbol}")
+                logger.warning(f"No price data for {symbol}")
                 continue # skip if no price data (?)
             
             price = prices[symbol]
@@ -130,13 +133,12 @@ class IBKRExecutor(Executor):
 
         for symbol, quantity, side in sell_orders:
             if quantity > 0:
-                print(f"Placing order: {side} {quantity} {symbol}")
+                logger.info(f"Placing order: {side} {quantity} {symbol}")
                 await self.place_order(symbol, quantity, side)
 
         for symbol, quantity, side in buy_orders:
             if quantity > 0:
-                print(f"Placing order: {side} {quantity} {symbol}")
+                logger.info(f"Placing order: {side} {quantity} {symbol}")
                 await self.place_order(symbol, quantity, side)
-        
-        print(f"{len(sell_orders)} sell orders were placed")
-        print(f"{len(buy_orders)} buy orders were placed")
+
+        logger.info(f"Rebalance complete: {len(sell_orders)} sell orders, {len(buy_orders)} buy orders")

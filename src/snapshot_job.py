@@ -221,10 +221,8 @@ class SnapshotJob:
 
 
 async def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    from src.main import setup_logging
+    setup_logging()
     
     job = SnapshotJob()
     
