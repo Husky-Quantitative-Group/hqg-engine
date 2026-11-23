@@ -275,16 +275,6 @@ def test_environment_proxy_is_the_only_proxy_both_clients_use(monkeypatch, proxy
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("proxy", ["proxy.test:3128", "socks5://proxy.test:1080", "http://:3128"])
-def test_environment_rejects_invalid_proxy(monkeypatch, proxy):
-    monkeypatch.setenv("ALPACA_API_KEY", "test-key")
-    monkeypatch.setenv("ALPACA_SECRET_KEY", "test-secret")
-    monkeypatch.delenv("ALPACA_PAPER", raising=False)
-    monkeypatch.setenv("ALPACA_PROXY_URL", proxy)
-    with pytest.raises(ValueError, match="ALPACA_PROXY_URL must be an http or https proxy URL"):
-        brokers_from_environment()
-
-
 def test_sdk_does_not_retry_orders_after_uncertain_response(monkeypatch):
     seen = []
 

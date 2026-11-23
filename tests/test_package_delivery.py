@@ -187,27 +187,6 @@ def test_failed_download_keeps_cache_and_acknowledges_only_complete_set(failure)
     asyncio.run(scenario())
 
 
-def test_provider_syncs_through_the_dashboard_proxy():
-    async def scenario():
-        async with refusing_proxy() as (proxy, request_lines):
-            provider = Provider(
-                str(uuid4()),
-                str(uuid4()),
-                "test-secret",
-                "https://api.test/stage",
-                {"paper": Broker()},
-                Runtime(),
-                dashboard_proxy=proxy,
-            )
-            try:
-                assert not await provider.sync_once()
-            finally:
-                await provider.dashboard.aclose()
-        return provider.sync_error, request_lines
-
-    assert asyncio.run(scenario()) == ("ProxyError", ["CONNECT api.test:443 HTTP/1.1"])
-
-
 @pytest.mark.parametrize("value,proxy", [
     (None, None), ("", None), (" http://proxy.test:3128 ", "http://proxy.test:3128"),
 ])

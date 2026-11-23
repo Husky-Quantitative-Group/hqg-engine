@@ -1,3 +1,4 @@
+import logging
 import os
 import secrets
 from contextlib import asynccontextmanager
@@ -11,6 +12,10 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from src.control.provider import Provider
 from src.control.runtime import Runtime
 from src.control.transport import brokers_from_environment
+from src.control.alternative import AlternativeService
+from src.main import setup_logging
+
+logger = logging.getLogger(__name__)
 
 
 class Context(BaseModel):
@@ -48,6 +53,12 @@ class StrategyFailure(BaseModel):
     message: str = Field(max_length=500)
 
 
+class AlternativeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    context: Context
+    series: list[str] = Field(min_length=1, max_length=1000)
+
+
 def from_environment():
     from src.database import async_session
 
@@ -66,11 +77,13 @@ def from_environment():
     )
 
 
-def create_app(provider=None, worker_secret=None, background=True):
+def create_app(provider=None, worker_secret=None, background=True, alternative=None):
     @asynccontextmanager
     async def lifespan(app):
+        setup_logging()
         app.state.provider = provider or from_environment()
         app.state.worker_secret = worker_secret or os.environ["PROVIDER_WORKER_SECRET"]
+        app.state.alternative = alternative or AlternativeService()
         if background:
             await app.state.provider.start()
 
@@ -86,6 +99,7 @@ def create_app(provider=None, worker_secret=None, background=True):
             if not secrets.compare_digest(
                 request.headers.get("authorization", ""), expected
             ):
+                logger.warning(f"Rejected unauthenticated request to {request.url.path}")
                 return JSONResponse(
                     {"detail": "Worker authentication required"}, status_code=403
                 )
@@ -156,13 +170,31 @@ def create_app(provider=None, worker_secret=None, background=True):
         except HTTPException:
             raise
         except Exception:
+            logger.critical(
+                f"Rebalance {body.operation_id} for {body.context.mode} failed unexpectedly",
+                exc_info=True,
+            )
             app.state.provider.close(("paper", "live"), "runtime_database_unavailable")
             raise HTTPException(503, "Execution unavailable")
+
+    @app.post("/internal/alternative-data")
+    async def alternative_data(body: AlternativeRequest):
+        context = body.context.model_dump()
+        app.state.provider.admit(context)
+        try:
+            result = await app.state.alternative.fetch(
+                app.state.provider.state(), context['mode'], body.series,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        app.state.provider.admit(context)
+        return result
 
     @app.post("/internal/failure")
     async def strategy_failure(body: StrategyFailure):
         context = body.context.model_dump()
         app.state.provider.admit(context)
+        logger.error(f"Strategy failure reported for {context['mode']}: {body.message}")
         app.state.provider.close(
             (context["mode"],), "strategy_execution_failed", force=True
         )

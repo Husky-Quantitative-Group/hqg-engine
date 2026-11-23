@@ -62,7 +62,8 @@ def test_get_session_rolls_back_and_reraises(monkeypatch):
     session.close.assert_awaited_once_with()
 
 
-def test_init_db_creates_metadata(monkeypatch, capsys):
+def test_init_db_creates_metadata(monkeypatch, caplog):
+    caplog.set_level("INFO", logger=database.__name__)
     connection = Mock()
     connection.run_sync = AsyncMock()
     connection.execute = AsyncMock()
@@ -84,10 +85,11 @@ def test_init_db_creates_metadata(monkeypatch, capsys):
     monkeypatch.setattr(database.Base.metadata, "create_all", create_all)
     callback(sync_connection)
     create_all.assert_called_once_with(bind=sync_connection)
-    assert capsys.readouterr().out == "Initialized database\n"
+    assert caplog.messages == ["Initialized database"]
 
 
-def test_close_db_disposes_engine(monkeypatch, capsys):
+def test_close_db_disposes_engine(monkeypatch, caplog):
+    caplog.set_level("INFO", logger=database.__name__)
     engine = Mock()
     engine.dispose = AsyncMock()
     monkeypatch.setattr(database, "engine", engine)
@@ -95,7 +97,7 @@ def test_close_db_disposes_engine(monkeypatch, capsys):
     asyncio.run(database.close_db())
 
     engine.dispose.assert_awaited_once_with()
-    assert capsys.readouterr().out == "Closed database connection\n"
+    assert caplog.messages == ["Closed database connection"]
 
 
 def test_wait_for_postgres_requires_database_url(monkeypatch):

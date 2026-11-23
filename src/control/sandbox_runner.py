@@ -3,6 +3,9 @@
 import contextlib
 import importlib.util
 import json
+import math
+from datetime import datetime, timezone
+from types import MappingProxyType
 from pathlib import Path
 import sys
 import tempfile
@@ -19,11 +22,30 @@ from hqg_algorithms import (
 )
 
 from src.control.packages import validate_package
+from src.alt_data import normalize_series
+
+
+def decode_history(payload, declared):
+    if not isinstance(payload, dict) or set(payload) != set(declared):
+        raise ValueError("Alternative history differs from declared series")
+    result = {}
+    for series, history in payload.items():
+        values = {}
+        for date, value in history.items():
+            observation = datetime.fromisoformat(date)
+            if observation.tzinfo is not None:
+                observation = observation.astimezone(timezone.utc).replace(tzinfo=None)
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise ValueError("Invalid alternative history value")
+            values[observation] = float(value)
+        result[series] = MappingProxyType(dict(sorted(values.items())))
+    return result
 
 
 def main():
     protocol = sys.stdout
     instance = None
+    alt_data = []
     with tempfile.TemporaryDirectory() as directory:
         for line in sys.stdin:
             try:
@@ -61,6 +83,10 @@ def main():
                                 "Strategy class, universe or cadence differs from registered package"
                             )
                         instance = cls()
+                        alt_data = normalize_series(getattr(cls, 'alt_data', []))
+                        declared = get_strategy_metadata(package["files"][package["entrypoint"]])
+                        if alt_data != normalize_series(getattr(declared, 'alt_data', [])):
+                            raise ValueError("Alternative series differ from registered package")
                         result = {"ready": True}
                     else:
                         bars = {
@@ -68,7 +94,9 @@ def main():
                             for symbol, bar in message["bars"].items()
                         }
                         signal = instance.on_data(
-                            Slice(bars), PortfolioView(**message["portfolio"])
+                            Slice(bars, alt_history=decode_history(
+                                message.get('alt_history', {}), alt_data,
+                            )), PortfolioView(**message["portfolio"])
                         )
                         if isinstance(signal, TargetWeights):
                             weights = dict(signal.weights)
